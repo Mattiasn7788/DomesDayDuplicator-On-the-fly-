@@ -1,0 +1,3 @@
+/usr/local/bin/DomesdayDuplicator
+/usr/local/bin/dddconv
+/usr/local/bin/dddutil

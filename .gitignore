@@ -1,0 +1,49 @@
+# Build directories
+build/
+*/build/
+
+# CMake generated files
+CMakeFiles/
+CMakeCache.txt
+CMakeOutput.log
+CMakeError.log
+cmake_install.cmake
+install_manifest.txt
+Makefile
+CTestTestfile.cmake
+
+# CMake build artifacts
+*_autogen/
+*.o
+*.a
+*.so
+*.dll
+*.exe
+
+# Qt generated files
+moc_*.cpp
+moc_*.h
+ui_*.h
+qrc_*.cpp
+*.pro.user
+*.pro.user.*
+
+# IDE files
+.vscode/
+.idea/
+*.kate-swp
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Test executables and temporary files
+test_resampler*
+version_check*
+*.tmp

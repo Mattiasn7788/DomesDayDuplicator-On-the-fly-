@@ -1,0 +1,67 @@
+# Real-Time Downsampling Support
+
+This version of DomesdayDuplicator includes real-time downsampling support for LaserDisc RF capture, allowing you to capture at reduced sample rates (20 MSPS and 10 MSPS) while maintaining high quality through proper anti-aliasing.
+
+## Dependencies
+
+The downsampling feature requires FFmpeg's `libswresample` library for high-quality audio resampling.
+
+### Ubuntu/Debian
+```bash
+sudo apt install libswresample-dev libavutil-dev
+```
+
+### Red Hat/CentOS/Fedora
+```bash
+sudo yum install ffmpeg-devel
+# or on newer versions:
+sudo dnf install ffmpeg-devel
+```
+
+### Windows
+FFmpeg libraries should be installed and available in the system PATH.
+
+## Building
+
+Use the provided build script to ensure system libraries are used:
+
+```bash
+./build_with_system_ffmpeg.sh
+```
+
+Or manually:
+```bash
+# Set PKG_CONFIG_PATH to prefer system libraries
+export PKG_CONFIG_PATH="/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig"
+
+cmake -B build -S .
+cmake --build build -j$(nproc)
+```
+
+## Downsampling Modes
+
+The application now supports three new capture formats:
+
+1. **16-bit Signed (40 MSPS)** - Original full rate capture
+2. **16-bit Signed Half Rate (20 MSPS)** - Real-time 2:1 downsampling 
+3. **16-bit Signed Quarter Rate (10 MSPS)** - Real-time 4:1 downsampling
+
+## Technical Details
+
+- **Real-time processing**: Downsampling occurs during capture, not post-processing
+- **High quality**: Uses FFmpeg's libswresample with proper anti-aliasing filters
+- **Memory efficient**: Processes data in chunks without excessive buffering
+- **Cross-platform**: Compatible with system FFmpeg libraries on Linux, Windows, and macOS
+
+## Verification
+
+You can verify the resampling is working correctly by checking the test output:
+```bash
+cd build/DomesdayDuplicator
+ldd DomesdayDuplicator | grep swresample
+```
+
+Should show system library linkage like:
+```
+libswresample.so.3 => /lib/x86_64-linux-gnu/libswresample.so.3
+```
