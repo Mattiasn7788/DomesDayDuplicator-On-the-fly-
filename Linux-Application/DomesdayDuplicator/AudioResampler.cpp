@@ -56,23 +56,26 @@ bool AudioResampler::initialize(uint32_t inputSampleRate, uint32_t outputSampleR
         return true;
     }
     
-    // Use system FFmpeg 4.4.2 compatible API
-    swrContext = swr_alloc_set_opts(
-        nullptr,                       // existing context (nullptr = allocate new)
-        AV_CH_LAYOUT_MONO,            // output channel layout (int64_t)
+    // Use FFmpeg 5.0+ compatible API with AVChannelLayout
+    AVChannelLayout out_ch_layout = AV_CHANNEL_LAYOUT_MONO;
+    AVChannelLayout in_ch_layout = AV_CHANNEL_LAYOUT_MONO;
+    
+    int ret = swr_alloc_set_opts2(&swrContext,
+        &out_ch_layout,               // output channel layout
         AV_SAMPLE_FMT_S16,            // output sample format
         outputSampleRate,             // output sample rate
-        AV_CH_LAYOUT_MONO,            // input channel layout (int64_t)
+        &in_ch_layout,                // input channel layout
         AV_SAMPLE_FMT_S16,            // input sample format
         inputSampleRate,              // input sample rate
         0,                            // log offset
         nullptr                       // log context
     );
     
-    if (!swrContext) {
-        qDebug() << "AudioResampler::initialize(): Failed to allocate resampling context";
+    if (ret < 0) {
+        qDebug() << "AudioResampler::initialize(): Failed to allocate resampling context, error:" << ret;
         return false;
     }
+    
     
     qDebug() << "AudioResampler: Configured" << inputSampleRate << "->" << outputSampleRate;
     

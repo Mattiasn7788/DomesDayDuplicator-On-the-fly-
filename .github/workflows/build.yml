@@ -74,7 +74,7 @@ jobs:
         cp build/dddutil/dddutil artifacts/DomesdayDuplicator-Linux-x64/
         cp DOWNSAMPLING_README.md artifacts/DomesdayDuplicator-Linux-x64/
         cp build_with_system_ffmpeg.sh artifacts/DomesdayDuplicator-Linux-x64/
-        cp ../../README.md artifacts/DomesdayDuplicator-Linux-x64/
+        # cp ../../README.md artifacts/DomesdayDuplicator-Linux-x64/  # No README.md exists in repo
         
         # Create simple install script
         cat > artifacts/DomesdayDuplicator-Linux-x64/install.sh << 'EOF'
@@ -133,7 +133,7 @@ jobs:
         # Verify build tools
         which gcc && which g++ && ls /mingw64/bin/*make*
         
-        cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -G "MSYS Makefiles"
+        cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -G "MSYS Makefiles" -DCMAKE_MAKE_PROGRAM=/mingw64/bin/mingw32-make.exe
         cmake --build build --config Release -j$(nproc)
     
     - name: Test Windows Build
@@ -159,7 +159,7 @@ jobs:
         cp build/dddconv/dddconv.exe artifacts/DomesdayDuplicator-Windows-x64/
         cp build/dddutil/dddutil.exe artifacts/DomesdayDuplicator-Windows-x64/
         cp DOWNSAMPLING_README.md artifacts/DomesdayDuplicator-Windows-x64/
-        cp ../../README.md artifacts/DomesdayDuplicator-Windows-x64/
+        # cp ../../README.md artifacts/DomesdayDuplicator-Windows-x64/  # No README.md exists in repo
         
         # Copy essential DLLs
         ldd build/DomesdayDuplicator/DomesdayDuplicator.exe | grep mingw64 | awk '{print $3}' | head -20 | while read dll; do
@@ -219,7 +219,7 @@ jobs:
         cp build/dddutil/dddutil artifacts/DomesdayDuplicator-macOS-x64/
         cp DOWNSAMPLING_README.md artifacts/DomesdayDuplicator-macOS-x64/
         cp build_with_system_ffmpeg.sh artifacts/DomesdayDuplicator-macOS-x64/
-        cp ../../README.md artifacts/DomesdayDuplicator-macOS-x64/
+        # cp ../../README.md artifacts/DomesdayDuplicator-macOS-x64/  # No README.md exists in repo
         
         tar -czf DomesdayDuplicator-macOS-x64.tar.gz -C artifacts DomesdayDuplicator-macOS-x64
     
