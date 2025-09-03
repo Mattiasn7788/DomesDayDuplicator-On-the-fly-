@@ -1,0 +1,98 @@
+name: Apple Silicon Build
+
+on:
+  push:
+    branches: [ master, main, develop ]
+    paths:
+      - 'Linux-Application/**'
+  pull_request:
+    branches: [ master, main, develop ]
+    paths:
+      - 'Linux-Application/**'
+  workflow_dispatch:
+
+jobs:
+  build-apple-silicon:
+    runs-on: macos-14  # Apple Silicon runner
+    name: macOS ARM64 (Apple Silicon)
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: System Info
+      run: |
+        echo "=== Apple Silicon System Info ==="
+        uname -a
+        sysctl -n machdep.cpu.brand_string
+        echo "Homebrew architecture: $(brew --version | head -1)"
+    
+    - name: Install Dependencies
+      run: |
+        brew install cmake pkg-config libusb ffmpeg qt6
+    
+    - name: Build Apple Silicon
+      working-directory: Linux-Application
+      run: |
+        export PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig"
+        export Qt6_DIR="$(brew --prefix qt6)/lib/cmake/Qt6"
+        
+        cmake -B build -S . \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DQt6_DIR="$Qt6_DIR" \
+          -DCMAKE_OSX_ARCHITECTURES=arm64
+        
+        cmake --build build --config Release -j$(sysctl -n hw.ncpu)
+    
+    - name: Test Apple Silicon Build
+      working-directory: Linux-Application
+      run: |
+        echo "=== Testing Apple Silicon Build ==="
+        build/DomesdayDuplicator/DomesdayDuplicator --version
+        
+        echo "=== Architecture Verification ==="
+        file build/DomesdayDuplicator/DomesdayDuplicator
+        lipo -archs build/DomesdayDuplicator/DomesdayDuplicator
+        
+        echo "=== Dependencies ==="
+        otool -L build/DomesdayDuplicator/DomesdayDuplicator | head -10
+    
+    - name: Package Apple Silicon
+      working-directory: Linux-Application
+      run: |
+        mkdir -p package/DomesdayDuplicator-macOS-ARM64
+        cp build/DomesdayDuplicator/DomesdayDuplicator package/DomesdayDuplicator-macOS-ARM64/
+        cp build/dddconv/dddconv package/DomesdayDuplicator-macOS-ARM64/
+        cp build/dddutil/dddutil package/DomesdayDuplicator-macOS-ARM64/
+        cp DOWNSAMPLING_README.md package/DomesdayDuplicator-macOS-ARM64/
+        cp ../README.md package/DomesdayDuplicator-macOS-ARM64/
+        
+        # Add Apple Silicon specific info
+        cat > package/DomesdayDuplicator-macOS-ARM64/APPLE_SILICON_INFO.txt << 'EOF'
+        DomesdayDuplicator for Apple Silicon (ARM64)
+        ==========================================
+        
+        This build is specifically compiled for Apple Silicon Macs (M1, M2, M3+).
+        
+        Requirements:
+        - macOS 11.0 (Big Sur) or later
+        - Homebrew: brew install cmake pkg-config libusb ffmpeg qt6
+        - Apple Silicon Mac (M1/M2/M3 processor)
+        
+        To verify you're on Apple Silicon:
+        - System Settings → About This Mac → Chip
+        - Or run: sysctl -n machdep.cpu.brand_string
+        
+        Installation:
+        1. Install Homebrew dependencies listed above
+        2. Extract this archive  
+        3. Run: ./DomesdayDuplicator
+        EOF
+        
+        tar -czf DomesdayDuplicator-macOS-ARM64.tar.gz -C package DomesdayDuplicator-macOS-ARM64
+    
+    - name: Upload Apple Silicon Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: DomesdayDuplicator-macOS-ARM64
+        path: Linux-Application/DomesdayDuplicator-macOS-ARM64.tar.gz
+        retention-days: 30
