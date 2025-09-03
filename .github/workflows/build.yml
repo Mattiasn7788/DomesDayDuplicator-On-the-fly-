@@ -32,7 +32,10 @@ jobs:
           qt6-base-dev \
           qt6-base-dev-tools \
           libqt6widgets6 \
-          libqt6serialport6-dev
+          libqt6serialport6-dev \
+          libgl1-mesa-dev \
+          libglu1-mesa-dev \
+          libxkbcommon-dev
     
     - name: Configure and Build
       working-directory: Linux-Application
@@ -125,6 +128,11 @@ jobs:
       working-directory: Linux-Application
       run: |
         export PKG_CONFIG_PATH="/mingw64/lib/pkgconfig"
+        export PATH="/mingw64/bin:$PATH"
+        
+        # Verify build tools
+        which gcc && which g++ && which make
+        
         cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -G "MSYS Makefiles"
         cmake --build build --config Release -j$(nproc)
     
@@ -177,6 +185,8 @@ jobs:
     
     - name: Install dependencies
       run: |
+        # Fix cmake conflict
+        brew uninstall cmake || true
         brew install cmake pkg-config libusb ffmpeg qt6
     
     - name: Build
