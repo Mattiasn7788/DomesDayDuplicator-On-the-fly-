@@ -235,7 +235,7 @@ jobs:
         path: Linux-Application/DomesdayDuplicator-Windows-x64.tar.gz
         retention-days: 30
 
-  # Windows ARM64 Build
+  # Windows ARM64 Build - Using cross-compilation from MINGW64
   build-windows-arm64:
     runs-on: windows-2022
     name: Windows ARM64 Build
@@ -246,30 +246,37 @@ jobs:
     - name: Setup MSYS2
       uses: msys2/setup-msys2@v2
       with:
-        msystem: CLANGARM64
+        msystem: MINGW64
         update: true
         install: >-
-          mingw-w64-clang-aarch64-gcc
-          mingw-w64-clang-aarch64-cmake
-          mingw-w64-clang-aarch64-make
-          mingw-w64-clang-aarch64-pkg-config
-          mingw-w64-clang-aarch64-libusb
-          mingw-w64-clang-aarch64-ffmpeg
-          mingw-w64-clang-aarch64-qt6-base
-          mingw-w64-clang-aarch64-qt6-tools
-          mingw-w64-clang-aarch64-qt6-serialport
+          mingw-w64-x86_64-gcc
+          mingw-w64-x86_64-cmake
+          mingw-w64-x86_64-make
+          mingw-w64-x86_64-pkg-config
+          mingw-w64-aarch64-gcc
+          mingw-w64-aarch64-libusb
+          mingw-w64-aarch64-ffmpeg
+          mingw-w64-aarch64-qt6-base
+          mingw-w64-aarch64-qt6-tools
+          mingw-w64-aarch64-qt6-serialport
     
     - name: Build
       shell: msys2 {0}
       working-directory: Linux-Application
       run: |
-        export PKG_CONFIG_PATH="/clangarm64/lib/pkgconfig"
-        export PATH="/clangarm64/bin:$PATH"
+        export PKG_CONFIG_PATH="/mingw64/lib/pkgconfig"
+        export PATH="/mingw64/bin:$PATH"
         
-        # Verify build tools
-        which gcc && which g++ && ls /clangarm64/bin/*make*
+        # Use x64 cmake to cross-compile for ARM64
+        which gcc && which cmake
         
-        cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -G "MSYS Makefiles" -DCMAKE_MAKE_PROGRAM=/clangarm64/bin/mingw32-make.exe
+        cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -G "MSYS Makefiles" \
+          -DCMAKE_MAKE_PROGRAM=/mingw64/bin/mingw32-make.exe \
+          -DCMAKE_C_COMPILER=aarch64-w64-mingw32-gcc \
+          -DCMAKE_CXX_COMPILER=aarch64-w64-mingw32-g++ \
+          -DCMAKE_SYSTEM_NAME=Windows \
+          -DCMAKE_SYSTEM_PROCESSOR=ARM64 \
+          -DPKG_CONFIG_EXECUTABLE=/mingw64/bin/pkg-config.exe
         cmake --build build --config Release -j$(nproc)
     
     - name: Verify Windows ARM64 Build
@@ -399,7 +406,16 @@ jobs:
       run: |
         export PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig"
         export Qt6_DIR="$(brew --prefix qt6)/lib/cmake/Qt6"
-        cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DQt6_DIR="$Qt6_DIR" -DCMAKE_OSX_ARCHITECTURES=arm64
+        export LDFLAGS="-L$(brew --prefix)/lib"
+        export CPPFLAGS="-I$(brew --prefix)/include"
+        
+        # Ensure ARM64 libraries are found
+        cmake -B build -S . -DCMAKE_BUILD_TYPE=Release \
+          -DQt6_DIR="$Qt6_DIR" \
+          -DCMAKE_OSX_ARCHITECTURES=arm64 \
+          -DCMAKE_PREFIX_PATH="$(brew --prefix)" \
+          -DCMAKE_LIBRARY_PATH="$(brew --prefix)/lib" \
+          -DCMAKE_INCLUDE_PATH="$(brew --prefix)/include"
         cmake --build build --config Release -j$(sysctl -n hw.ncpu)
     
     - name: Verify macOS ARM64 Build
