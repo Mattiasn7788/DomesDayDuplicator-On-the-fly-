@@ -1,0 +1,107 @@
+name: Linux x86 Build
+
+on:
+  push:
+    branches: [ master, main, develop ]
+    paths:
+      - 'Linux-Application/**'
+  pull_request:
+    branches: [ master, main, develop ]
+    paths:
+      - 'Linux-Application/**'
+  workflow_dispatch:
+
+jobs:
+  build-linux-x86:
+    runs-on: ubuntu-22.04
+    name: Linux i386 (32-bit)
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Enable 32-bit Architecture
+      run: |
+        sudo dpkg --add-architecture i386
+        sudo apt update
+    
+    - name: Install 32-bit Dependencies
+      run: |
+        sudo apt install -y \
+          gcc-multilib \
+          g++-multilib \
+          cmake \
+          pkg-config \
+          libusb-1.0-0-dev:i386 \
+          libswresample-dev:i386 \
+          libavutil-dev:i386 \
+          qt6-base-dev:i386 \
+          libqt6widgets6:i386 \
+          libqt6serialport6-dev:i386
+    
+    - name: Build Linux x86
+      working-directory: Linux-Application
+      run: |
+        export PKG_CONFIG_PATH="/usr/lib/i386-linux-gnu/pkgconfig:/usr/share/pkgconfig"
+        export CC="gcc -m32"
+        export CXX="g++ -m32"
+        
+        cmake -B build -S . \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_C_FLAGS=-m32 \
+          -DCMAKE_CXX_FLAGS=-m32 \
+          -DCMAKE_SYSTEM_PROCESSOR=i386
+        
+        cmake --build build --config Release -j$(nproc)
+    
+    - name: Test Linux x86 Build
+      working-directory: Linux-Application
+      run: |
+        echo "=== Testing Linux i386 Build ==="
+        build/DomesdayDuplicator/DomesdayDuplicator --version
+        
+        echo "=== Architecture Verification ==="
+        file build/DomesdayDuplicator/DomesdayDuplicator
+        
+        echo "=== Dependencies Check ==="
+        ldd build/DomesdayDuplicator/DomesdayDuplicator | grep -E "(swresample|avutil)" || echo "FFmpeg libs not found"
+    
+    - name: Package Linux x86
+      working-directory: Linux-Application
+      run: |
+        mkdir -p package/DomesdayDuplicator-Linux-i386
+        cp build/DomesdayDuplicator/DomesdayDuplicator package/DomesdayDuplicator-Linux-i386/
+        cp build/dddconv/dddconv package/DomesdayDuplicator-Linux-i386/
+        cp build/dddutil/dddutil package/DomesdayDuplicator-Linux-i386/
+        cp DOWNSAMPLING_README.md package/DomesdayDuplicator-Linux-i386/
+        cp ../README.md package/DomesdayDuplicator-Linux-i386/
+        
+        # Add x86 specific info
+        cat > package/DomesdayDuplicator-Linux-i386/LINUX_X86_INFO.txt << 'EOF'
+        DomesdayDuplicator for Linux i386 (32-bit)
+        =========================================
+        
+        This build is specifically compiled for 32-bit Linux systems.
+        
+        Requirements:
+        - 32-bit Linux distribution
+        - libusb-1.0-0:i386
+        - libswresample3:i386  
+        - libavutil56:i386
+        - qt6-base:i386
+        
+        Installation:
+        sudo dpkg --add-architecture i386
+        sudo apt update
+        sudo apt install libusb-1.0-0:i386 libswresample3:i386 libavutil56:i386 qt6-base:i386
+        
+        Then run: ./DomesdayDuplicator
+        EOF
+        
+        tar -czf DomesdayDuplicator-Linux-i386.tar.gz -C package DomesdayDuplicator-Linux-i386
+    
+    - name: Upload Linux x86 Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: DomesdayDuplicator-Linux-i386
+        path: Linux-Application/DomesdayDuplicator-Linux-i386.tar.gz
+        retention-days: 30
