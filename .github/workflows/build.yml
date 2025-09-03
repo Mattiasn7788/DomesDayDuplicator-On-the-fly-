@@ -1,10 +1,10 @@
-name: Build and Test
+name: Build Binaries
 
 on:
   push:
-    branches: [ master, main, develop ]
+    branches: [ master, main ]
   pull_request:
-    branches: [ master, main, develop ]
+    branches: [ master, main ]
   workflow_dispatch:
 
 env:
@@ -51,19 +51,6 @@ jobs:
         ls -la build/DomesdayDuplicator/DomesdayDuplicator
         ls -la build/dddconv/dddconv
         ls -la build/dddutil/dddutil
-        
-        echo "=== Testing Executables ==="
-        echo "DomesdayDuplicator version:"
-        build/DomesdayDuplicator/DomesdayDuplicator --version || echo "No version flag available"
-        
-        echo "dddconv help:"
-        timeout 5 build/dddconv/dddconv --help 2>/dev/null || echo "Help timeout or no --help"
-        
-        echo "dddutil help:"
-        timeout 5 build/dddutil/dddutil --help 2>/dev/null || echo "Help timeout or no --help"
-        
-        echo "=== Checking Dependencies ==="
-        ldd build/DomesdayDuplicator/DomesdayDuplicator | grep -E "(swresample|avutil)" || echo "FFmpeg libraries not found in ldd"
     
     - name: Package Linux Build
       working-directory: Linux-Application
@@ -136,7 +123,7 @@ jobs:
         cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -G "MSYS Makefiles" -DCMAKE_MAKE_PROGRAM=/mingw64/bin/mingw32-make.exe
         cmake --build build --config Release -j$(nproc)
     
-    - name: Test Windows Build
+    - name: Verify Windows Build
       shell: msys2 {0}
       working-directory: Linux-Application
       run: |
@@ -144,11 +131,6 @@ jobs:
         ls -la build/DomesdayDuplicator/DomesdayDuplicator.exe
         ls -la build/dddconv/dddconv.exe
         ls -la build/dddutil/dddutil.exe
-        
-        echo "=== Testing Executables ==="
-        build/DomesdayDuplicator/DomesdayDuplicator.exe --version || echo "No version flag available"
-        timeout 5 build/dddconv/dddconv.exe --help || echo "Help timeout"
-        timeout 5 build/dddutil/dddutil.exe --help || echo "Help timeout"
     
     - name: Package Windows Build
       shell: msys2 {0}
@@ -197,45 +179,13 @@ jobs:
         cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DQt6_DIR="$Qt6_DIR"
         cmake --build build --config Release -j$(sysctl -n hw.ncpu)
     
-    - name: Test macOS Build
+    - name: Verify macOS Build
       working-directory: Linux-Application
       run: |
         echo "=== macOS Build Products ==="
-        echo "Looking for DomesdayDuplicator.app bundle:"
-        ls -la build/DomesdayDuplicator/ || echo "No .app bundle found"
-        find build -name "DomesdayDuplicator*" -type f || echo "Searching for DomesdayDuplicator binary"
-        
-        echo "Looking for dddconv:"
-        ls -la build/dddconv/dddconv || echo "dddconv not found at expected location"
-        find build -name "dddconv*" -type f || echo "Searching for dddconv binary"
-        
-        echo "Looking for dddutil.app bundle:"
-        ls -la build/dddutil/ || echo "No dddutil.app bundle found"
-        find build -name "dddutil*" -type f || echo "Searching for dddutil binary"
-        
-        echo "=== Testing Executables (if found) ==="
-        # Try to find and test the main app binary
-        if [ -f "build/DomesdayDuplicator/DomesdayDuplicator.app/Contents/MacOS/DomesdayDuplicator" ]; then
-          echo "Testing DomesdayDuplicator.app:"
-          build/DomesdayDuplicator/DomesdayDuplicator.app/Contents/MacOS/DomesdayDuplicator --version || echo "No version flag available"
-        elif [ -f "build/DomesdayDuplicator/DomesdayDuplicator" ]; then
-          echo "Testing DomesdayDuplicator binary:"
-          build/DomesdayDuplicator/DomesdayDuplicator --version || echo "No version flag available"
-        fi
-        
-        # Test dddconv
-        if [ -f "build/dddconv/dddconv" ]; then
-          timeout 5 build/dddconv/dddconv --help || echo "Help timeout"
-        fi
-        
-        # Try to find and test dddutil
-        if [ -f "build/dddutil/dddutil.app/Contents/MacOS/dddutil" ]; then
-          echo "Testing dddutil.app:"
-          timeout 5 build/dddutil/dddutil.app/Contents/MacOS/dddutil --help || echo "Help timeout"
-        elif [ -f "build/dddutil/dddutil" ]; then
-          echo "Testing dddutil binary:"
-          timeout 5 build/dddutil/dddutil --help || echo "Help timeout"
-        fi
+        ls -la build/DomesdayDuplicator/ || echo "DomesdayDuplicator not found"
+        ls -la build/dddconv/dddconv || echo "dddconv not found"
+        ls -la build/dddutil/ || echo "dddutil not found"
     
     - name: Package macOS Build
       working-directory: Linux-Application
