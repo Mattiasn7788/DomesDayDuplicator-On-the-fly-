@@ -11,8 +11,8 @@ env:
   BUILD_TYPE: Release
 
 jobs:
-  # Linux x64 Build - Primary target
-  build-linux:
+  # Linux x64 Build
+  build-linux-x64:
     runs-on: ubuntu-22.04
     name: Linux x64 Build
     
@@ -86,8 +86,86 @@ jobs:
         path: Linux-Application/DomesdayDuplicator-Linux-x64.tar.gz
         retention-days: 30
 
-  # Windows Build - Simplified
-  build-windows:
+  # Linux ARM64 Build
+  build-linux-arm64:
+    runs-on: ubuntu-22.04
+    name: Linux ARM64 Build
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+      with:
+        platforms: arm64
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Build ARM64 binaries in container
+      run: |
+        docker run --rm --platform=linux/arm64 \
+          -v ${{ github.workspace }}:/workspace \
+          -w /workspace/Linux-Application \
+          ubuntu:22.04 bash -c "
+            apt update && apt install -y \
+              build-essential cmake pkg-config \
+              libusb-1.0-0-dev libswresample-dev libavutil-dev \
+              qt6-base-dev qt6-base-dev-tools libqt6widgets6 \
+              libqt6serialport6-dev libgl1-mesa-dev \
+              libglu1-mesa-dev libxkbcommon-dev
+            
+            export PKG_CONFIG_PATH='/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig'
+            cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+            cmake --build build --config Release -j\$(nproc)
+          "
+    
+    - name: Verify Build Products
+      working-directory: Linux-Application
+      run: |
+        echo "=== Build Products ==="
+        file build/DomesdayDuplicator/DomesdayDuplicator
+        file build/dddconv/dddconv
+        file build/dddutil/dddutil
+        ls -la build/DomesdayDuplicator/DomesdayDuplicator
+        ls -la build/dddconv/dddconv
+        ls -la build/dddutil/dddutil
+    
+    - name: Package Linux ARM64 Build
+      working-directory: Linux-Application
+      run: |
+        mkdir -p artifacts/DomesdayDuplicator-Linux-ARM64
+        cp build/DomesdayDuplicator/DomesdayDuplicator artifacts/DomesdayDuplicator-Linux-ARM64/
+        cp build/dddconv/dddconv artifacts/DomesdayDuplicator-Linux-ARM64/
+        cp build/dddutil/dddutil artifacts/DomesdayDuplicator-Linux-ARM64/
+        cp DOWNSAMPLING_README.md artifacts/DomesdayDuplicator-Linux-ARM64/
+        cp build_with_system_ffmpeg.sh artifacts/DomesdayDuplicator-Linux-ARM64/
+        
+        # Create simple install script
+        cat > artifacts/DomesdayDuplicator-Linux-ARM64/install.sh << 'EOF'
+        #!/bin/bash
+        echo "DomesdayDuplicator Linux ARM64 Installation"
+        echo "=========================================="
+        echo "Prerequisites: libusb-1.0-0 libswresample3 libavutil56 qt6-base"
+        echo "Install with: sudo apt install libusb-1.0-0 libswresample3 libavutil56 qt6-base"
+        echo ""
+        echo "To run: ./DomesdayDuplicator"
+        chmod +x DomesdayDuplicator dddconv dddutil
+        EOF
+        chmod +x artifacts/DomesdayDuplicator-Linux-ARM64/install.sh
+        
+        tar -czf DomesdayDuplicator-Linux-ARM64.tar.gz -C artifacts DomesdayDuplicator-Linux-ARM64
+        ls -la DomesdayDuplicator-Linux-ARM64.tar.gz
+    
+    - name: Upload Linux ARM64 Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: DomesdayDuplicator-Linux-ARM64
+        path: Linux-Application/DomesdayDuplicator-Linux-ARM64.tar.gz
+        retention-days: 30
+
+  # Windows x64 Build
+  build-windows-x64:
     runs-on: windows-2022
     name: Windows x64 Build
     
@@ -157,10 +235,83 @@ jobs:
         path: Linux-Application/DomesdayDuplicator-Windows-x64.tar.gz
         retention-days: 30
 
-  # macOS Build - Simplified for Intel
-  build-macos:
+  # Windows ARM64 Build
+  build-windows-arm64:
+    runs-on: windows-2022
+    name: Windows ARM64 Build
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup MSYS2
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: CLANGARM64
+        update: true
+        install: >-
+          mingw-w64-clang-aarch64-gcc
+          mingw-w64-clang-aarch64-cmake
+          mingw-w64-clang-aarch64-make
+          mingw-w64-clang-aarch64-pkg-config
+          mingw-w64-clang-aarch64-libusb
+          mingw-w64-clang-aarch64-ffmpeg
+          mingw-w64-clang-aarch64-qt6-base
+          mingw-w64-clang-aarch64-qt6-tools
+          mingw-w64-clang-aarch64-qt6-serialport
+    
+    - name: Build
+      shell: msys2 {0}
+      working-directory: Linux-Application
+      run: |
+        export PKG_CONFIG_PATH="/clangarm64/lib/pkgconfig"
+        export PATH="/clangarm64/bin:$PATH"
+        
+        # Verify build tools
+        which gcc && which g++ && ls /clangarm64/bin/*make*
+        
+        cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -G "MSYS Makefiles" -DCMAKE_MAKE_PROGRAM=/clangarm64/bin/mingw32-make.exe
+        cmake --build build --config Release -j$(nproc)
+    
+    - name: Verify Windows ARM64 Build
+      shell: msys2 {0}
+      working-directory: Linux-Application
+      run: |
+        echo "=== Windows ARM64 Build Products ==="
+        file build/DomesdayDuplicator/DomesdayDuplicator.exe
+        file build/dddconv/dddconv.exe
+        file build/dddutil/dddutil.exe
+        ls -la build/DomesdayDuplicator/DomesdayDuplicator.exe
+        ls -la build/dddconv/dddconv.exe
+        ls -la build/dddutil/dddutil.exe
+    
+    - name: Package Windows ARM64 Build
+      shell: msys2 {0}
+      working-directory: Linux-Application
+      run: |
+        mkdir -p artifacts/DomesdayDuplicator-Windows-ARM64
+        cp build/DomesdayDuplicator/DomesdayDuplicator.exe artifacts/DomesdayDuplicator-Windows-ARM64/
+        cp build/dddconv/dddconv.exe artifacts/DomesdayDuplicator-Windows-ARM64/
+        cp build/dddutil/dddutil.exe artifacts/DomesdayDuplicator-Windows-ARM64/
+        cp DOWNSAMPLING_README.md artifacts/DomesdayDuplicator-Windows-ARM64/
+        
+        # Copy essential DLLs
+        ldd build/DomesdayDuplicator/DomesdayDuplicator.exe | grep clangarm64 | awk '{print $3}' | head -20 | while read dll; do
+          [ -f "$dll" ] && cp "$dll" artifacts/DomesdayDuplicator-Windows-ARM64/ || true
+        done
+        
+        tar -czf DomesdayDuplicator-Windows-ARM64.tar.gz -C artifacts DomesdayDuplicator-Windows-ARM64
+    
+    - name: Upload Windows ARM64 Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: DomesdayDuplicator-Windows-ARM64
+        path: Linux-Application/DomesdayDuplicator-Windows-ARM64.tar.gz
+        retention-days: 30
+
+  # macOS x64 Build (Intel)
+  build-macos-x64:
     runs-on: macos-13  # Intel runner
-    name: macOS Build
+    name: macOS x64 Build
     
     steps:
     - uses: actions/checkout@v4
@@ -222,9 +373,83 @@ jobs:
         
         tar -czf DomesdayDuplicator-macOS-x64.tar.gz -C artifacts DomesdayDuplicator-macOS-x64
     
-    - name: Upload macOS Artifacts
+    - name: Upload macOS x64 Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: DomesdayDuplicator-macOS-x64
         path: Linux-Application/DomesdayDuplicator-macOS-x64.tar.gz
+        retention-days: 30
+
+  # macOS ARM64 Build (Apple Silicon)
+  build-macos-arm64:
+    runs-on: macos-14  # Apple Silicon runner
+    name: macOS ARM64 Build
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install dependencies
+      run: |
+        # Fix cmake conflict
+        brew uninstall cmake || true
+        brew install cmake pkg-config libusb ffmpeg qt6
+    
+    - name: Build
+      working-directory: Linux-Application
+      run: |
+        export PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig"
+        export Qt6_DIR="$(brew --prefix qt6)/lib/cmake/Qt6"
+        cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DQt6_DIR="$Qt6_DIR" -DCMAKE_OSX_ARCHITECTURES=arm64
+        cmake --build build --config Release -j$(sysctl -n hw.ncpu)
+    
+    - name: Verify macOS ARM64 Build
+      working-directory: Linux-Application
+      run: |
+        echo "=== macOS ARM64 Build Products ==="
+        file build/DomesdayDuplicator/DomesdayDuplicator || file build/DomesdayDuplicator/DomesdayDuplicator.app/Contents/MacOS/DomesdayDuplicator || echo "DomesdayDuplicator not found"
+        file build/dddconv/dddconv || echo "dddconv not found"
+        file build/dddutil/dddutil || file build/dddutil/dddutil.app/Contents/MacOS/dddutil || echo "dddutil not found"
+        ls -la build/DomesdayDuplicator/ || echo "DomesdayDuplicator not found"
+        ls -la build/dddconv/dddconv || echo "dddconv not found"
+        ls -la build/dddutil/ || echo "dddutil not found"
+    
+    - name: Package macOS ARM64 Build
+      working-directory: Linux-Application
+      run: |
+        mkdir -p artifacts/DomesdayDuplicator-macOS-ARM64
+        
+        # Copy DomesdayDuplicator (app bundle or binary)
+        if [ -d "build/DomesdayDuplicator/DomesdayDuplicator.app" ]; then
+          echo "Packaging DomesdayDuplicator.app bundle"
+          cp -R build/DomesdayDuplicator/DomesdayDuplicator.app artifacts/DomesdayDuplicator-macOS-ARM64/
+        elif [ -f "build/DomesdayDuplicator/DomesdayDuplicator" ]; then
+          echo "Packaging DomesdayDuplicator binary"
+          cp build/DomesdayDuplicator/DomesdayDuplicator artifacts/DomesdayDuplicator-macOS-ARM64/
+        fi
+        
+        # Copy dddconv
+        if [ -f "build/dddconv/dddconv" ]; then
+          cp build/dddconv/dddconv artifacts/DomesdayDuplicator-macOS-ARM64/
+        fi
+        
+        # Copy dddutil (app bundle or binary)
+        if [ -d "build/dddutil/dddutil.app" ]; then
+          echo "Packaging dddutil.app bundle"
+          cp -R build/dddutil/dddutil.app artifacts/DomesdayDuplicator-macOS-ARM64/
+        elif [ -f "build/dddutil/dddutil" ]; then
+          echo "Packaging dddutil binary"
+          cp build/dddutil/dddutil artifacts/DomesdayDuplicator-macOS-ARM64/
+        fi
+        
+        # Copy additional files
+        cp DOWNSAMPLING_README.md artifacts/DomesdayDuplicator-macOS-ARM64/
+        cp build_with_system_ffmpeg.sh artifacts/DomesdayDuplicator-macOS-ARM64/
+        
+        tar -czf DomesdayDuplicator-macOS-ARM64.tar.gz -C artifacts DomesdayDuplicator-macOS-ARM64
+    
+    - name: Upload macOS ARM64 Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: DomesdayDuplicator-macOS-ARM64
+        path: Linux-Application/DomesdayDuplicator-macOS-ARM64.tar.gz
         retention-days: 30
