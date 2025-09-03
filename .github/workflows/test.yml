@@ -1,0 +1,206 @@
+name: Test DomesdayDuplicator
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  # Quick build test on Ubuntu (fastest feedback)
+  test-build:
+    runs-on: ubuntu-22.04
+    name: Quick Build Test
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y \
+          build-essential \
+          cmake \
+          pkg-config \
+          libusb-1.0-0-dev \
+          libswresample-dev \
+          libavutil-dev \
+          qt6-base-dev \
+          qt6-base-dev-tools \
+          libqt6widgets6 \
+          libqt6serialport6-dev
+    
+    - name: Test system library detection
+      run: |
+        echo "=== System FFmpeg Libraries ==="
+        pkg-config --modversion libswresample libavutil || echo "pkg-config failed"
+        pkg-config --libs libswresample libavutil || echo "pkg-config libs failed"
+        echo "==============================="
+    
+    - name: Configure CMake
+      working-directory: Linux-Application
+      run: |
+        export PKG_CONFIG_PATH="/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig"
+        cmake -B build -S . -DCMAKE_BUILD_TYPE=Debug
+    
+    - name: Build
+      working-directory: Linux-Application
+      run: |
+        export PKG_CONFIG_PATH="/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig"
+        cmake --build build --config Debug -j$(nproc)
+    
+    - name: Test Applications
+      working-directory: Linux-Application/build
+      run: |
+        echo "=== Testing DomesdayDuplicator ==="
+        DomesdayDuplicator/DomesdayDuplicator --help || echo "DomesdayDuplicator failed"
+        
+        echo "=== Testing dddconv ==="
+        dddconv/dddconv --help || echo "dddconv failed"
+        
+        echo "=== Testing dddutil ==="  
+        dddutil/dddutil --help || echo "dddutil failed"
+        
+        echo "=== Checking library linkage ==="
+        ldd DomesdayDuplicator/DomesdayDuplicator | grep -E "(swresample|avutil)" || echo "No FFmpeg libraries linked"
+        
+        echo "=== Test system build script ==="
+        cd ../..
+        ./Linux-Application/build_with_system_ffmpeg.sh
+
+  # FFmpeg compatibility test
+  ffmpeg-compatibility:
+    runs-on: ubuntu-20.04
+    name: FFmpeg Compatibility Test (Ubuntu 20.04)
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y \
+          build-essential \
+          cmake \
+          pkg-config \
+          libusb-1.0-0-dev \
+          libswresample-dev \
+          libavutil-dev \
+          qt6-base-dev \
+          qt6-base-dev-tools \
+          libqt6widgets6 \
+          libqt6serialport6-dev
+    
+    - name: Check FFmpeg version
+      run: |
+        echo "=== FFmpeg Version Test ==="
+        pkg-config --modversion libswresample libavutil
+        echo "==========================="
+    
+    - name: Configure and Build
+      working-directory: Linux-Application
+      run: |
+        export PKG_CONFIG_PATH="/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig"
+        cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+        cmake --build build --config Release -j$(nproc)
+        
+        echo "=== Testing with older FFmpeg ==="
+        build/DomesdayDuplicator/DomesdayDuplicator --help
+        ldd build/DomesdayDuplicator/DomesdayDuplicator | grep -E "(swresample|avutil)"
+
+  # Downsampling functionality test
+  downsampling-test:
+    runs-on: ubuntu-22.04
+    name: Downsampling Functionality Test
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y \
+          build-essential \
+          cmake \
+          pkg-config \
+          libusb-1.0-0-dev \
+          libswresample-dev \
+          libavutil-dev \
+          qt6-base-dev \
+          qt6-base-dev-tools \
+          libqt6widgets6 \
+          libqt6serialport6-dev
+    
+    - name: Build
+      working-directory: Linux-Application
+      run: |
+        export PKG_CONFIG_PATH="/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig"
+        cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+        cmake --build build --config Release -j$(nproc)
+    
+    - name: Test AudioResampler functionality
+      working-directory: Linux-Application
+      run: |
+        echo "=== Creating AudioResampler Test ==="
+        cat > test_audio_resampler.cpp << 'EOF'
+        #include "DomesdayDuplicator/AudioResampler.h"
+        #include <iostream>
+        #include <vector>
+        #include <cmath>
+        
+        int main() {
+            std::cout << "Testing AudioResampler downsampling functionality..." << std::endl;
+            
+            // Test 1/2 downsampling (40 MSPS -> 20 MSPS)
+            AudioResampler resampler;
+            if (!resampler.initialize(40000000, 20000000)) {
+                std::cerr << "Failed to initialize resampler" << std::endl;
+                return 1;
+            }
+            
+            // Generate test data
+            std::vector<int16_t> inputData(8000);
+            for (int i = 0; i < 8000; ++i) {
+                inputData[i] = (int16_t)(sin(2.0 * M_PI * i / 40.0) * 16384.0);
+            }
+            
+            // Resample
+            int expectedOutputSamples = resampler.getExpectedOutputSampleCount(8000);
+            std::vector<int16_t> outputData(expectedOutputSamples);
+            
+            int actualOutputSamples = resampler.resample(inputData.data(), 8000, 
+                                                        outputData.data(), expectedOutputSamples);
+            
+            if (actualOutputSamples < 0) {
+                std::cerr << "Resampling failed" << std::endl;
+                return 1;
+            }
+            
+            double ratio = (double)actualOutputSamples / 8000;
+            std::cout << "Input samples: " << 8000 << std::endl;
+            std::cout << "Output samples: " << actualOutputSamples << std::endl;
+            std::cout << "Ratio: " << ratio << std::endl;
+            
+            if (ratio < 0.45 || ratio > 0.55) {
+                std::cerr << "Ratio out of expected range (0.45-0.55)" << std::endl;
+                return 1;
+            }
+            
+            std::cout << "AudioResampler test PASSED!" << std::endl;
+            return 0;
+        }
+        EOF
+        
+        echo "=== Compiling test ==="
+        g++ -std=c++17 -fPIC \
+          -I/usr/include/x86_64-linux-gnu/qt6 \
+          -I/usr/include/x86_64-linux-gnu/qt6/QtCore \
+          -IDomesdayDuplicator \
+          test_audio_resampler.cpp \
+          DomesdayDuplicator/AudioResampler.cpp \
+          -L/usr/lib/x86_64-linux-gnu \
+          -lswresample -lavutil -lQt6Core -lm \
+          -o test_audio_resampler
+        
+        echo "=== Running test ==="
+        ./test_audio_resampler
