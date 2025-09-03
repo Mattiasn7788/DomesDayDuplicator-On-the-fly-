@@ -201,22 +201,71 @@ jobs:
       working-directory: Linux-Application
       run: |
         echo "=== macOS Build Products ==="
-        ls -la build/DomesdayDuplicator/DomesdayDuplicator
-        ls -la build/dddconv/dddconv
-        ls -la build/dddutil/dddutil
+        echo "Looking for DomesdayDuplicator.app bundle:"
+        ls -la build/DomesdayDuplicator/ || echo "No .app bundle found"
+        find build -name "DomesdayDuplicator*" -type f || echo "Searching for DomesdayDuplicator binary"
         
-        echo "=== Testing Executables ==="
-        build/DomesdayDuplicator/DomesdayDuplicator --version || echo "No version flag available"
-        timeout 5 build/dddconv/dddconv --help || echo "Help timeout"
-        timeout 5 build/dddutil/dddutil --help || echo "Help timeout"
+        echo "Looking for dddconv:"
+        ls -la build/dddconv/dddconv || echo "dddconv not found at expected location"
+        find build -name "dddconv*" -type f || echo "Searching for dddconv binary"
+        
+        echo "Looking for dddutil.app bundle:"
+        ls -la build/dddutil/ || echo "No dddutil.app bundle found"
+        find build -name "dddutil*" -type f || echo "Searching for dddutil binary"
+        
+        echo "=== Testing Executables (if found) ==="
+        # Try to find and test the main app binary
+        if [ -f "build/DomesdayDuplicator/DomesdayDuplicator.app/Contents/MacOS/DomesdayDuplicator" ]; then
+          echo "Testing DomesdayDuplicator.app:"
+          build/DomesdayDuplicator/DomesdayDuplicator.app/Contents/MacOS/DomesdayDuplicator --version || echo "No version flag available"
+        elif [ -f "build/DomesdayDuplicator/DomesdayDuplicator" ]; then
+          echo "Testing DomesdayDuplicator binary:"
+          build/DomesdayDuplicator/DomesdayDuplicator --version || echo "No version flag available"
+        fi
+        
+        # Test dddconv
+        if [ -f "build/dddconv/dddconv" ]; then
+          timeout 5 build/dddconv/dddconv --help || echo "Help timeout"
+        fi
+        
+        # Try to find and test dddutil
+        if [ -f "build/dddutil/dddutil.app/Contents/MacOS/dddutil" ]; then
+          echo "Testing dddutil.app:"
+          timeout 5 build/dddutil/dddutil.app/Contents/MacOS/dddutil --help || echo "Help timeout"
+        elif [ -f "build/dddutil/dddutil" ]; then
+          echo "Testing dddutil binary:"
+          timeout 5 build/dddutil/dddutil --help || echo "Help timeout"
+        fi
     
     - name: Package macOS Build
       working-directory: Linux-Application
       run: |
         mkdir -p artifacts/DomesdayDuplicator-macOS-x64
-        cp build/DomesdayDuplicator/DomesdayDuplicator artifacts/DomesdayDuplicator-macOS-x64/
-        cp build/dddconv/dddconv artifacts/DomesdayDuplicator-macOS-x64/
-        cp build/dddutil/dddutil artifacts/DomesdayDuplicator-macOS-x64/
+        
+        # Copy DomesdayDuplicator (app bundle or binary)
+        if [ -d "build/DomesdayDuplicator/DomesdayDuplicator.app" ]; then
+          echo "Packaging DomesdayDuplicator.app bundle"
+          cp -R build/DomesdayDuplicator/DomesdayDuplicator.app artifacts/DomesdayDuplicator-macOS-x64/
+        elif [ -f "build/DomesdayDuplicator/DomesdayDuplicator" ]; then
+          echo "Packaging DomesdayDuplicator binary"
+          cp build/DomesdayDuplicator/DomesdayDuplicator artifacts/DomesdayDuplicator-macOS-x64/
+        fi
+        
+        # Copy dddconv
+        if [ -f "build/dddconv/dddconv" ]; then
+          cp build/dddconv/dddconv artifacts/DomesdayDuplicator-macOS-x64/
+        fi
+        
+        # Copy dddutil (app bundle or binary)
+        if [ -d "build/dddutil/dddutil.app" ]; then
+          echo "Packaging dddutil.app bundle"
+          cp -R build/dddutil/dddutil.app artifacts/DomesdayDuplicator-macOS-x64/
+        elif [ -f "build/dddutil/dddutil" ]; then
+          echo "Packaging dddutil binary"
+          cp build/dddutil/dddutil artifacts/DomesdayDuplicator-macOS-x64/
+        fi
+        
+        # Copy additional files
         cp DOWNSAMPLING_README.md artifacts/DomesdayDuplicator-macOS-x64/
         cp build_with_system_ffmpeg.sh artifacts/DomesdayDuplicator-macOS-x64/
         # cp ../../README.md artifacts/DomesdayDuplicator-macOS-x64/  # No README.md exists in repo

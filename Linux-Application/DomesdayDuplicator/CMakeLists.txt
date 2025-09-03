@@ -51,8 +51,8 @@ if(WIN32)
     )
 
     target_link_libraries(DomesdayDuplicator PRIVATE
-        AdvAPI32
-        onecoreuap
+        advapi32
+        setupapi
         winusb
     )
 endif()
