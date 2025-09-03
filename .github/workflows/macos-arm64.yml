@@ -1,0 +1,306 @@
+name: macOS ARM64 Build (Apple Silicon)
+
+on:
+  push:
+    branches: [ master, main, develop ]
+    paths:
+      - 'Linux-Application/**'
+      - '.github/workflows/macos-arm64.yml'
+  pull_request:
+    branches: [ master, main, develop ]
+    paths:
+      - 'Linux-Application/**'
+  workflow_dispatch:
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  build-macos-arm64:
+    runs-on: macos-14  # Apple Silicon runner (ARM64)
+    name: macOS ARM64 Apple Silicon Build & Test
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: System Information
+      run: |
+        echo "=== macOS System Information ==="
+        system_profiler SPSoftwareDataType SPHardwareDataType | grep -E "(System Version|Model Name|Chip|Memory)"
+        echo "Architecture: $(uname -m)"
+        echo "Kernel: $(uname -v)"
+        echo "Shell: $SHELL"
+        echo "Rosetta status:"
+        pgrep oahd >/dev/null && echo "Rosetta is running" || echo "Rosetta not detected"
+        echo "==============================="
+    
+    - name: Install Homebrew Dependencies
+      run: |
+        echo "=== Installing Dependencies ==="
+        # Update Homebrew
+        brew update
+        
+        # Install required packages
+        brew install cmake pkg-config libusb ffmpeg qt6
+        
+        # Verify installations
+        echo "=== Installed Versions ==="
+        cmake --version
+        pkg-config --version
+        echo "FFmpeg version:"
+        ffmpeg -version | head -1
+        echo "Qt6 version:"
+        qmake6 -v || qmake -v || echo "qmake not found"
+        echo "libusb version:"
+        brew list --versions libusb
+        echo "Homebrew prefix: $(brew --prefix)"
+        echo "==========================="
+    
+    - name: Check Library Detection
+      working-directory: Linux-Application
+      run: |
+        export PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig"
+        echo "PKG_CONFIG_PATH: $PKG_CONFIG_PATH"
+        echo "Qt6_DIR: $(brew --prefix qt6)/lib/cmake/Qt6"
+        
+        echo "=== Library Detection ==="
+        pkg-config --exists libswresample && echo "✓ libswresample found" || echo "✗ libswresample not found"
+        pkg-config --exists libavutil && echo "✓ libavutil found" || echo "✗ libavutil not found" 
+        pkg-config --exists libusb-1.0 && echo "✓ libusb-1.0 found" || echo "✗ libusb-1.0 not found"
+        
+        echo "Library versions:"
+        pkg-config --modversion libswresample libavutil libusb-1.0
+        
+        echo "Library paths:"
+        echo "libswresample: $(pkg-config --libs libswresample)"
+        echo "libavutil: $(pkg-config --libs libavutil)"
+        echo "libusb-1.0: $(pkg-config --libs libusb-1.0)"
+        
+        echo "Architecture-specific paths:"
+        ls -la $(brew --prefix)/lib/ | head -10
+        echo "==========================="
+    
+    - name: Configure CMake
+      working-directory: Linux-Application
+      run: |
+        export PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig"
+        export Qt6_DIR="$(brew --prefix qt6)/lib/cmake/Qt6"
+        
+        echo "=== CMake Configuration ==="
+        cmake -B build -S . \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_VERBOSE_MAKEFILE=ON \
+          -DQt6_DIR="$Qt6_DIR" \
+          -DCMAKE_OSX_ARCHITECTURES=arm64
+    
+    - name: Build
+      working-directory: Linux-Application
+      run: |
+        echo "=== Building ==="
+        cmake --build build --config Release -j$(sysctl -n hw.ncpu) --verbose
+    
+    - name: Test Executables
+      working-directory: Linux-Application
+      run: |
+        echo "=== Testing Executables ==="
+        
+        # Check if executables exist
+        ls -la build/DomesdayDuplicator/DomesdayDuplicator
+        ls -la build/dddconv/dddconv
+        ls -la build/dddutil/dddutil
+        
+        # Check executable architecture
+        echo "Checking executable architectures:"
+        file build/DomesdayDuplicator/DomesdayDuplicator
+        file build/dddconv/dddconv
+        file build/dddutil/dddutil
+        
+        # Verify ARM64 architecture
+        echo "Verifying ARM64 architecture:"
+        lipo -archs build/DomesdayDuplicator/DomesdayDuplicator
+        lipo -archs build/dddconv/dddconv  
+        lipo -archs build/dddutil/dddutil
+        
+        # Test version output
+        echo "Testing DomesdayDuplicator:"
+        build/DomesdayDuplicator/DomesdayDuplicator --version || echo "Version test failed"
+        
+        echo "Testing dddconv:"
+        build/dddconv/dddconv --version || echo "Version test failed"
+        
+        echo "Testing dddutil:"
+        build/dddutil/dddutil --version || echo "Version test failed"
+        
+        # Test help output (with timeout)
+        echo "Testing help commands:"
+        timeout 10 build/DomesdayDuplicator/DomesdayDuplicator --help || echo "Help test completed"
+        timeout 10 build/dddconv/dddconv --help || echo "Help test completed"
+        timeout 10 build/dddutil/dddutil --help || echo "Help test completed"
+    
+    - name: Check Dependencies
+      working-directory: Linux-Application
+      run: |
+        echo "=== Checking Runtime Dependencies ==="
+        echo "DomesdayDuplicator dependencies:"
+        otool -L build/DomesdayDuplicator/DomesdayDuplicator | grep -E "(Qt|usb|swresample|avutil|brew)" || true
+        
+        echo "dddconv dependencies:"
+        otool -L build/dddconv/dddconv | grep -E "(Qt|usb|swresample|avutil|brew)" || true
+        
+        echo "dddutil dependencies:"
+        otool -L build/dddutil/dddutil | grep -E "(Qt|usb|swresample|avutil|brew)" || true
+        
+        echo "=== Checking for Universal Binaries ==="
+        echo "DomesdayDuplicator architectures:"
+        lipo -detailed_info build/DomesdayDuplicator/DomesdayDuplicator || echo "Single architecture binary"
+    
+    - name: AudioResampler Test
+      working-directory: Linux-Application
+      run: |
+        echo "=== Testing AudioResampler Functionality ==="
+        
+        # Create test program
+        cat > test_resampler.cpp << 'EOF'
+        #include "DomesdayDuplicator/AudioResampler.h"
+        #include <iostream>
+        #include <vector>
+        #include <cmath>
+        
+        int main() {
+            try {
+                AudioResampler resampler;
+                
+                // Test initialization
+                if (!resampler.initialize(48000, 24000, AV_SAMPLE_FMT_S16)) {
+                    std::cerr << "Failed to initialize resampler" << std::endl;
+                    return 1;
+                }
+                
+                // Generate test sine wave (1000 samples at 48kHz)
+                std::vector<int16_t> input_samples(1000);
+                for (int i = 0; i < 1000; ++i) {
+                    input_samples[i] = static_cast<int16_t>(16000 * sin(2 * M_PI * 440 * i / 48000.0));
+                }
+                
+                // Perform downsampling
+                std::vector<int16_t> output_samples;
+                if (!resampler.resample(input_samples, output_samples)) {
+                    std::cerr << "Resampling failed" << std::endl;
+                    return 1;
+                }
+                
+                // Check output
+                std::cout << "Input samples: " << input_samples.size() << std::endl;
+                std::cout << "Output samples: " << output_samples.size() << std::endl;
+                
+                // Expected roughly half the samples (48kHz -> 24kHz)
+                double ratio = static_cast<double>(output_samples.size()) / input_samples.size();
+                std::cout << "Sample ratio: " << ratio << std::endl;
+                
+                if (ratio > 0.4 && ratio < 0.6) {
+                    std::cout << "✓ AudioResampler test PASSED" << std::endl;
+                    return 0;
+                } else {
+                    std::cerr << "✗ AudioResampler test FAILED: unexpected ratio" << std::endl;
+                    return 1;
+                }
+                
+            } catch (const std::exception& e) {
+                std::cerr << "Exception: " << e.what() << std::endl;
+                return 1;
+            }
+        }
+        EOF
+        
+        # Compile and run test
+        export PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig"
+        clang++ -std=c++17 -I. test_resampler.cpp build/DomesdayDuplicator/AudioResampler.o \
+            $(pkg-config --cflags --libs libswresample libavutil) \
+            -target arm64-apple-macos11 \
+            -o test_resampler
+        
+        echo "Test binary architecture:"
+        file test_resampler
+        lipo -archs test_resampler
+        
+        ./test_resampler
+    
+    - name: Package Artifacts
+      working-directory: Linux-Application
+      run: |
+        echo "=== Packaging ==="
+        mkdir -p artifacts/DomesdayDuplicator-macOS-ARM64
+        
+        # Copy executables
+        cp build/DomesdayDuplicator/DomesdayDuplicator artifacts/DomesdayDuplicator-macOS-ARM64/
+        cp build/dddconv/dddconv artifacts/DomesdayDuplicator-macOS-ARM64/
+        cp build/dddutil/dddutil artifacts/DomesdayDuplicator-macOS-ARM64/
+        
+        # Copy documentation
+        cp DOWNSAMPLING_README.md artifacts/DomesdayDuplicator-macOS-ARM64/
+        cp build_with_system_ffmpeg.sh artifacts/DomesdayDuplicator-macOS-ARM64/
+        cp ../README.md artifacts/DomesdayDuplicator-macOS-ARM64/
+        
+        # Create version info file
+        echo "Build Information:" > artifacts/DomesdayDuplicator-macOS-ARM64/BUILD_INFO.txt
+        echo "Build Date: $(date)" >> artifacts/DomesdayDuplicator-macOS-ARM64/BUILD_INFO.txt
+        echo "Platform: macOS ARM64 (Apple Silicon)" >> artifacts/DomesdayDuplicator-macOS-ARM64/BUILD_INFO.txt
+        echo "Architecture: $(uname -m)" >> artifacts/DomesdayDuplicator-macOS-ARM64/BUILD_INFO.txt
+        echo "macOS Version: $(sw_vers -productVersion)" >> artifacts/DomesdayDuplicator-macOS-ARM64/BUILD_INFO.txt
+        echo "Xcode Version: $(xcode-select --version)" >> artifacts/DomesdayDuplicator-macOS-ARM64/BUILD_INFO.txt
+        echo "Homebrew Prefix: $(brew --prefix)" >> artifacts/DomesdayDuplicator-macOS-ARM64/BUILD_INFO.txt
+        echo "Commit: ${{ github.sha }}" >> artifacts/DomesdayDuplicator-macOS-ARM64/BUILD_INFO.txt
+        echo "Branch: ${{ github.ref_name }}" >> artifacts/DomesdayDuplicator-macOS-ARM64/BUILD_INFO.txt
+        
+        # Add binary architecture info
+        echo "Binary Architectures:" >> artifacts/DomesdayDuplicator-macOS-ARM64/BUILD_INFO.txt
+        echo "DomesdayDuplicator: $(lipo -archs build/DomesdayDuplicator/DomesdayDuplicator)" >> artifacts/DomesdayDuplicator-macOS-ARM64/BUILD_INFO.txt
+        echo "dddconv: $(lipo -archs build/dddconv/dddconv)" >> artifacts/DomesdayDuplicator-macOS-ARM64/BUILD_INFO.txt
+        echo "dddutil: $(lipo -archs build/dddutil/dddutil)" >> artifacts/DomesdayDuplicator-macOS-ARM64/BUILD_INFO.txt
+        
+        # Create installation script
+        cat > artifacts/DomesdayDuplicator-macOS-ARM64/INSTALL.sh << 'EOF'
+        #!/bin/bash
+        echo "DomesdayDuplicator macOS Installation (Apple Silicon)"
+        echo "=================================================="
+        echo ""
+        echo "This package contains the DomesdayDuplicator suite for macOS Apple Silicon:"
+        echo "- DomesdayDuplicator: Main GUI application"
+        echo "- dddconv: Audio conversion utility"  
+        echo "- dddutil: Utility tools"
+        echo ""
+        echo "These binaries are built specifically for Apple Silicon (ARM64) Macs."
+        echo ""
+        echo "Prerequisites:"
+        echo "- Homebrew (https://brew.sh)"
+        echo "- Required libraries: brew install cmake pkg-config libusb ffmpeg qt6"
+        echo ""
+        echo "Note: Make sure you're using the ARM64 version of Homebrew:"
+        echo "  which brew should show: /opt/homebrew/bin/brew"
+        echo ""
+        echo "To make executables accessible system-wide:"
+        echo "  sudo cp DomesdayDuplicator dddconv dddutil /usr/local/bin/"
+        echo ""
+        echo "To run the GUI application:"
+        echo "  ./DomesdayDuplicator"
+        echo ""
+        echo "For command-line tools, see:"
+        echo "  ./dddconv --help"
+        echo "  ./dddutil --help"
+        echo ""
+        echo "To verify binary architecture:"
+        echo "  file DomesdayDuplicator"
+        echo "  lipo -archs DomesdayDuplicator"
+        echo ""
+        EOF
+        chmod +x artifacts/DomesdayDuplicator-macOS-ARM64/INSTALL.sh
+        
+        tar -czf DomesdayDuplicator-macOS-ARM64.tar.gz -C artifacts DomesdayDuplicator-macOS-ARM64
+        ls -la DomesdayDuplicator-macOS-ARM64.tar.gz
+    
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: DomesdayDuplicator-macOS-ARM64
+        path: Linux-Application/DomesdayDuplicator-macOS-ARM64.tar.gz
+        retention-days: 30
