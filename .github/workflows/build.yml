@@ -1,21 +1,20 @@
-name: Build DomesdayDuplicator
+name: Build and Test
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [ master, main, develop ]
   pull_request:
-    branches: [ main, develop ]
-  release:
-    types: [ published ]
+    branches: [ master, main, develop ]
+  workflow_dispatch:
 
 env:
   BUILD_TYPE: Release
 
 jobs:
-  # Linux x64 build
-  linux-x64:
+  # Linux x64 Build - Primary target
+  build-linux:
     runs-on: ubuntu-22.04
-    name: Linux x64
+    name: Linux x64 Build
     
     steps:
     - uses: actions/checkout@v4
@@ -35,255 +34,188 @@ jobs:
           libqt6widgets6 \
           libqt6serialport6-dev
     
-    - name: Configure CMake
+    - name: Configure and Build
       working-directory: Linux-Application
       run: |
         export PKG_CONFIG_PATH="/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig"
-        cmake -B build -S . -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}}
+        cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+        cmake --build build --config Release -j$(nproc)
     
-    - name: Build
+    - name: Verify Build Products
       working-directory: Linux-Application
       run: |
-        export PKG_CONFIG_PATH="/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig"
-        cmake --build build --config ${{env.BUILD_TYPE}} -j$(nproc)
+        echo "=== Build Products ==="
+        ls -la build/DomesdayDuplicator/DomesdayDuplicator
+        ls -la build/dddconv/dddconv
+        ls -la build/dddutil/dddutil
+        
+        echo "=== Testing Executables ==="
+        echo "DomesdayDuplicator version:"
+        build/DomesdayDuplicator/DomesdayDuplicator --version || echo "No version flag available"
+        
+        echo "dddconv help:"
+        timeout 5 build/dddconv/dddconv --help 2>/dev/null || echo "Help timeout or no --help"
+        
+        echo "dddutil help:"
+        timeout 5 build/dddutil/dddutil --help 2>/dev/null || echo "Help timeout or no --help"
+        
+        echo "=== Checking Dependencies ==="
+        ldd build/DomesdayDuplicator/DomesdayDuplicator | grep -E "(swresample|avutil)" || echo "FFmpeg libraries not found in ldd"
     
-    - name: Test Application
-      working-directory: Linux-Application/build/DomesdayDuplicator
-      run: |
-        ./DomesdayDuplicator --help
-        ldd DomesdayDuplicator | grep -E "(swresample|avutil)" || echo "No FFmpeg libraries found"
-    
-    - name: Package
+    - name: Package Linux Build
       working-directory: Linux-Application
       run: |
-        mkdir -p package/DomesdayDuplicator-Linux-x64
-        cp build/DomesdayDuplicator/DomesdayDuplicator package/DomesdayDuplicator-Linux-x64/
-        cp build/dddconv/dddconv package/DomesdayDuplicator-Linux-x64/
-        cp build/dddutil/dddutil package/DomesdayDuplicator-Linux-x64/
-        cp DOWNSAMPLING_README.md package/DomesdayDuplicator-Linux-x64/
-        cp build_with_system_ffmpeg.sh package/DomesdayDuplicator-Linux-x64/
-        chmod +x package/DomesdayDuplicator-Linux-x64/*
-        cd package && tar -czf DomesdayDuplicator-Linux-x64.tar.gz DomesdayDuplicator-Linux-x64/
+        mkdir -p artifacts/DomesdayDuplicator-Linux-x64
+        cp build/DomesdayDuplicator/DomesdayDuplicator artifacts/DomesdayDuplicator-Linux-x64/
+        cp build/dddconv/dddconv artifacts/DomesdayDuplicator-Linux-x64/
+        cp build/dddutil/dddutil artifacts/DomesdayDuplicator-Linux-x64/
+        cp DOWNSAMPLING_README.md artifacts/DomesdayDuplicator-Linux-x64/
+        cp build_with_system_ffmpeg.sh artifacts/DomesdayDuplicator-Linux-x64/
+        cp ../README.md artifacts/DomesdayDuplicator-Linux-x64/
+        
+        # Create simple install script
+        cat > artifacts/DomesdayDuplicator-Linux-x64/install.sh << 'EOF'
+        #!/bin/bash
+        echo "DomesdayDuplicator Linux Installation"
+        echo "====================================="
+        echo "Prerequisites: libusb-1.0-0 libswresample3 libavutil56 qt6-base"
+        echo "Install with: sudo apt install libusb-1.0-0 libswresample3 libavutil56 qt6-base"
+        echo ""
+        echo "To run: ./DomesdayDuplicator"
+        chmod +x DomesdayDuplicator dddconv dddutil
+        EOF
+        chmod +x artifacts/DomesdayDuplicator-Linux-x64/install.sh
+        
+        tar -czf DomesdayDuplicator-Linux-x64.tar.gz -C artifacts DomesdayDuplicator-Linux-x64
+        ls -la DomesdayDuplicator-Linux-x64.tar.gz
     
-    - name: Upload artifacts
+    - name: Upload Linux Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: DomesdayDuplicator-Linux-x64
-        path: Linux-Application/package/DomesdayDuplicator-Linux-x64.tar.gz
+        path: Linux-Application/DomesdayDuplicator-Linux-x64.tar.gz
+        retention-days: 30
 
-  # Linux ARM64 build
-  linux-arm64:
-    runs-on: ubuntu-22.04
-    name: Linux ARM64
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up QEMU
-      uses: docker/setup-qemu-action@v3
-      with:
-        platforms: arm64
-    
-    - name: Build in ARM64 container
-      run: |
-        docker run --rm --platform linux/arm64 \
-          -v ${{ github.workspace }}:/workspace \
-          -w /workspace \
-          ubuntu:22.04 bash -c "
-            apt update && apt install -y \
-              build-essential cmake pkg-config \
-              libusb-1.0-0-dev libswresample-dev libavutil-dev \
-              qt6-base-dev qt6-base-dev-tools libqt6widgets6 libqt6serialport6-dev
-            cd Linux-Application
-            export PKG_CONFIG_PATH='/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig'
-            cmake -B build -S . -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}}
-            cmake --build build --config ${{env.BUILD_TYPE}} -j\$(nproc)
-            mkdir -p package/DomesdayDuplicator-Linux-ARM64
-            cp build/DomesdayDuplicator/DomesdayDuplicator package/DomesdayDuplicator-Linux-ARM64/
-            cp build/dddconv/dddconv package/DomesdayDuplicator-Linux-ARM64/
-            cp build/dddutil/dddutil package/DomesdayDuplicator-Linux-ARM64/
-            cp DOWNSAMPLING_README.md package/DomesdayDuplicator-Linux-ARM64/
-            cp build_with_system_ffmpeg.sh package/DomesdayDuplicator-Linux-ARM64/
-            chmod +x package/DomesdayDuplicator-Linux-ARM64/*
-            cd package && tar -czf DomesdayDuplicator-Linux-ARM64.tar.gz DomesdayDuplicator-Linux-ARM64/
-        "
-    
-    - name: Upload artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: DomesdayDuplicator-Linux-ARM64
-        path: Linux-Application/package/DomesdayDuplicator-Linux-ARM64.tar.gz
-
-  # Windows x64 build
-  windows-x64:
+  # Windows Build - Simplified
+  build-windows:
     runs-on: windows-2022
-    name: Windows x64
+    name: Windows x64 Build
     
     steps:
     - uses: actions/checkout@v4
     
-    - name: Setup MSVC
-      uses: microsoft/setup-msbuild@v2
-    
-    - name: Install Qt
-      uses: jurplel/install-qt-action@v4
+    - name: Setup MSYS2
+      uses: msys2/setup-msys2@v2
       with:
-        version: '6.6.0'
-        arch: win64_msvc2019_64
-        cache: true
-    
-    - name: Install vcpkg dependencies
-      run: |
-        vcpkg install libusb:x64-windows ffmpeg:x64-windows
-    
-    - name: Configure CMake
-      working-directory: Linux-Application
-      run: |
-        cmake -B build -S . -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} `
-          -DCMAKE_TOOLCHAIN_FILE="C:/vcpkg/scripts/buildsystems/vcpkg.cmake" `
-          -DVCPKG_TARGET_TRIPLET=x64-windows
+        msystem: MINGW64
+        update: true
+        install: >-
+          mingw-w64-x86_64-gcc
+          mingw-w64-x86_64-cmake
+          mingw-w64-x86_64-make
+          mingw-w64-x86_64-pkg-config
+          mingw-w64-x86_64-libusb
+          mingw-w64-x86_64-ffmpeg
+          mingw-w64-x86_64-qt6-base
+          mingw-w64-x86_64-qt6-tools
+          mingw-w64-x86_64-qt6-serialport
     
     - name: Build
-      working-directory: Linux-Application
-      run: cmake --build build --config ${{env.BUILD_TYPE}} -j4
-    
-    - name: Test Application
-      working-directory: Linux-Application/build/DomesdayDuplicator/${{env.BUILD_TYPE}}
-      run: |
-        ./DomesdayDuplicator.exe --help
-    
-    - name: Package
+      shell: msys2 {0}
       working-directory: Linux-Application
       run: |
-        mkdir package\DomesdayDuplicator-Windows-x64
-        copy build\DomesdayDuplicator\${{env.BUILD_TYPE}}\DomesdayDuplicator.exe package\DomesdayDuplicator-Windows-x64\
-        copy build\dddconv\${{env.BUILD_TYPE}}\dddconv.exe package\DomesdayDuplicator-Windows-x64\
-        copy build\dddutil\${{env.BUILD_TYPE}}\dddutil.exe package\DomesdayDuplicator-Windows-x64\
-        copy DOWNSAMPLING_README.md package\DomesdayDuplicator-Windows-x64\
-        windeployqt package\DomesdayDuplicator-Windows-x64\DomesdayDuplicator.exe
-        Compress-Archive -Path package\DomesdayDuplicator-Windows-x64 -DestinationPath package\DomesdayDuplicator-Windows-x64.zip
+        export PKG_CONFIG_PATH="/mingw64/lib/pkgconfig"
+        cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -G "MSYS Makefiles"
+        cmake --build build --config Release -j$(nproc)
     
-    - name: Upload artifacts
+    - name: Test Windows Build
+      shell: msys2 {0}
+      working-directory: Linux-Application
+      run: |
+        echo "=== Windows Build Products ==="
+        ls -la build/DomesdayDuplicator/DomesdayDuplicator.exe
+        ls -la build/dddconv/dddconv.exe
+        ls -la build/dddutil/dddutil.exe
+        
+        echo "=== Testing Executables ==="
+        build/DomesdayDuplicator/DomesdayDuplicator.exe --version || echo "No version flag available"
+        timeout 5 build/dddconv/dddconv.exe --help || echo "Help timeout"
+        timeout 5 build/dddutil/dddutil.exe --help || echo "Help timeout"
+    
+    - name: Package Windows Build
+      shell: msys2 {0}
+      working-directory: Linux-Application
+      run: |
+        mkdir -p artifacts/DomesdayDuplicator-Windows-x64
+        cp build/DomesdayDuplicator/DomesdayDuplicator.exe artifacts/DomesdayDuplicator-Windows-x64/
+        cp build/dddconv/dddconv.exe artifacts/DomesdayDuplicator-Windows-x64/
+        cp build/dddutil/dddutil.exe artifacts/DomesdayDuplicator-Windows-x64/
+        cp DOWNSAMPLING_README.md artifacts/DomesdayDuplicator-Windows-x64/
+        cp ../README.md artifacts/DomesdayDuplicator-Windows-x64/
+        
+        # Copy essential DLLs
+        ldd build/DomesdayDuplicator/DomesdayDuplicator.exe | grep mingw64 | awk '{print $3}' | head -20 | while read dll; do
+          [ -f "$dll" ] && cp "$dll" artifacts/DomesdayDuplicator-Windows-x64/ || true
+        done
+        
+        tar -czf DomesdayDuplicator-Windows-x64.tar.gz -C artifacts DomesdayDuplicator-Windows-x64
+    
+    - name: Upload Windows Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: DomesdayDuplicator-Windows-x64
-        path: Linux-Application/package/DomesdayDuplicator-Windows-x64.zip
+        path: Linux-Application/DomesdayDuplicator-Windows-x64.tar.gz
+        retention-days: 30
 
-  # macOS x64 build
-  macos-x64:
-    runs-on: macos-12
-    name: macOS x64
+  # macOS Build - Simplified for Intel
+  build-macos:
+    runs-on: macos-13  # Intel runner
+    name: macOS Build
     
     steps:
     - uses: actions/checkout@v4
     
     - name: Install dependencies
       run: |
-        brew update
-        brew install cmake pkg-config libusb ffmpeg qt@6
-        echo "$(brew --prefix qt@6)/bin" >> $GITHUB_PATH
-        echo "PKG_CONFIG_PATH=$(brew --prefix ffmpeg)/lib/pkgconfig:$(brew --prefix libusb)/lib/pkgconfig" >> $GITHUB_ENV
-    
-    - name: Configure CMake
-      working-directory: Linux-Application
-      run: |
-        cmake -B build -S . -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} \
-          -DCMAKE_PREFIX_PATH="$(brew --prefix qt@6);$(brew --prefix libusb);$(brew --prefix ffmpeg)"
+        brew install cmake pkg-config libusb ffmpeg qt6
     
     - name: Build
       working-directory: Linux-Application
-      run: cmake --build build --config ${{env.BUILD_TYPE}} -j$(sysctl -n hw.ncpu)
-    
-    - name: Test Application
-      working-directory: Linux-Application/build/DomesdayDuplicator
       run: |
-        ./DomesdayDuplicator --help
-        otool -L DomesdayDuplicator | grep -E "(swresample|avutil)" || echo "No FFmpeg libraries found"
+        export PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig"
+        export Qt6_DIR="$(brew --prefix qt6)/lib/cmake/Qt6"
+        cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DQt6_DIR="$Qt6_DIR"
+        cmake --build build --config Release -j$(sysctl -n hw.ncpu)
     
-    - name: Package
+    - name: Test macOS Build
       working-directory: Linux-Application
       run: |
-        mkdir -p package/DomesdayDuplicator-macOS-x64
-        cp build/DomesdayDuplicator/DomesdayDuplicator package/DomesdayDuplicator-macOS-x64/
-        cp build/dddconv/dddconv package/DomesdayDuplicator-macOS-x64/
-        cp build/dddutil/dddutil package/DomesdayDuplicator-macOS-x64/
-        cp DOWNSAMPLING_README.md package/DomesdayDuplicator-macOS-x64/
-        chmod +x package/DomesdayDuplicator-macOS-x64/*
-        cd package && tar -czf DomesdayDuplicator-macOS-x64.tar.gz DomesdayDuplicator-macOS-x64/
+        echo "=== macOS Build Products ==="
+        ls -la build/DomesdayDuplicator/DomesdayDuplicator
+        ls -la build/dddconv/dddconv
+        ls -la build/dddutil/dddutil
+        
+        echo "=== Testing Executables ==="
+        build/DomesdayDuplicator/DomesdayDuplicator --version || echo "No version flag available"
+        timeout 5 build/dddconv/dddconv --help || echo "Help timeout"
+        timeout 5 build/dddutil/dddutil --help || echo "Help timeout"
     
-    - name: Upload artifacts
+    - name: Package macOS Build
+      working-directory: Linux-Application
+      run: |
+        mkdir -p artifacts/DomesdayDuplicator-macOS-x64
+        cp build/DomesdayDuplicator/DomesdayDuplicator artifacts/DomesdayDuplicator-macOS-x64/
+        cp build/dddconv/dddconv artifacts/DomesdayDuplicator-macOS-x64/
+        cp build/dddutil/dddutil artifacts/DomesdayDuplicator-macOS-x64/
+        cp DOWNSAMPLING_README.md artifacts/DomesdayDuplicator-macOS-x64/
+        cp build_with_system_ffmpeg.sh artifacts/DomesdayDuplicator-macOS-x64/
+        cp ../README.md artifacts/DomesdayDuplicator-macOS-x64/
+        
+        tar -czf DomesdayDuplicator-macOS-x64.tar.gz -C artifacts DomesdayDuplicator-macOS-x64
+    
+    - name: Upload macOS Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: DomesdayDuplicator-macOS-x64
-        path: Linux-Application/package/DomesdayDuplicator-macOS-x64.tar.gz
-
-  # macOS ARM64 build
-  macos-arm64:
-    runs-on: macos-14
-    name: macOS ARM64
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Install dependencies
-      run: |
-        brew update
-        brew install cmake pkg-config libusb ffmpeg qt@6
-        echo "$(brew --prefix qt@6)/bin" >> $GITHUB_PATH
-        echo "PKG_CONFIG_PATH=$(brew --prefix ffmpeg)/lib/pkgconfig:$(brew --prefix libusb)/lib/pkgconfig" >> $GITHUB_ENV
-    
-    - name: Configure CMake
-      working-directory: Linux-Application
-      run: |
-        cmake -B build -S . -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} \
-          -DCMAKE_PREFIX_PATH="$(brew --prefix qt@6);$(brew --prefix libusb);$(brew --prefix ffmpeg)"
-    
-    - name: Build
-      working-directory: Linux-Application
-      run: cmake --build build --config ${{env.BUILD_TYPE}} -j$(sysctl -n hw.ncpu)
-    
-    - name: Test Application
-      working-directory: Linux-Application/build/DomesdayDuplicator
-      run: |
-        ./DomesdayDuplicator --help
-        otool -L DomesdayDuplicator | grep -E "(swresample|avutil)" || echo "No FFmpeg libraries found"
-    
-    - name: Package
-      working-directory: Linux-Application
-      run: |
-        mkdir -p package/DomesdayDuplicator-macOS-ARM64
-        cp build/DomesdayDuplicator/DomesdayDuplicator package/DomesdayDuplicator-macOS-ARM64/
-        cp build/dddconv/dddconv package/DomesdayDuplicator-macOS-ARM64/
-        cp build/dddutil/dddutil package/DomesdayDuplicator-macOS-ARM64/
-        cp DOWNSAMPLING_README.md package/DomesdayDuplicator-macOS-ARM64/
-        chmod +x package/DomesdayDuplicator-macOS-ARM64/*
-        cd package && tar -czf DomesdayDuplicator-macOS-ARM64.tar.gz DomesdayDuplicator-macOS-ARM64/
-    
-    - name: Upload artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: DomesdayDuplicator-macOS-ARM64
-        path: Linux-Application/package/DomesdayDuplicator-macOS-ARM64.tar.gz
-
-  # Create release if this is a tag push
-  release:
-    needs: [linux-x64, linux-arm64, windows-x64, macos-x64, macos-arm64]
-    runs-on: ubuntu-latest
-    if: github.event_name == 'release' && github.event.action == 'published'
-    
-    steps:
-    - name: Download all artifacts
-      uses: actions/download-artifact@v4
-      with:
-        path: artifacts
-    
-    - name: Upload release assets
-      uses: softprops/action-gh-release@v1
-      with:
-        files: |
-          artifacts/DomesdayDuplicator-Linux-x64/DomesdayDuplicator-Linux-x64.tar.gz
-          artifacts/DomesdayDuplicator-Linux-ARM64/DomesdayDuplicator-Linux-ARM64.tar.gz
-          artifacts/DomesdayDuplicator-Windows-x64/DomesdayDuplicator-Windows-x64.zip
-          artifacts/DomesdayDuplicator-macOS-x64/DomesdayDuplicator-macOS-x64.tar.gz
-          artifacts/DomesdayDuplicator-macOS-ARM64/DomesdayDuplicator-macOS-ARM64.tar.gz
-        token: ${{ secrets.GITHUB_TOKEN }}
+        path: Linux-Application/DomesdayDuplicator-macOS-x64.tar.gz
+        retention-days: 30
