@@ -1317,8 +1317,18 @@ void MainWindow::StartCapture()
     }
     else if (configuration->getCaptureFormat() == Configuration::CaptureFormat::flacDirect)
     {
-        qDebug() << "MainWindow::StartCapture(): Starting transfer - 16-bit (will compress to FLAC post-capture)";
-        captureFormat = UsbDeviceBase::CaptureFormat::Signed16Bit;
+        // For FLAC Direct, check the sample rate configuration
+        int sampleRate = configuration->getSampleRate();
+        if (sampleRate == 1) {
+            qDebug() << "MainWindow::StartCapture(): Starting transfer - 16-bit 1/2 rate (20 MSPS) FLAC Direct with real-time downsampling";
+            captureFormat = UsbDeviceBase::CaptureFormat::Signed16BitHalf;
+        } else if (sampleRate == 2) {
+            qDebug() << "MainWindow::StartCapture(): Starting transfer - 16-bit 1/4 rate (10 MSPS) FLAC Direct with real-time downsampling";
+            captureFormat = UsbDeviceBase::CaptureFormat::Signed16BitQuarter;
+        } else {
+            qDebug() << "MainWindow::StartCapture(): Starting transfer - 16-bit (40 MSPS) FLAC Direct";
+            captureFormat = UsbDeviceBase::CaptureFormat::Signed16Bit;
+        }
     }
     else
     {

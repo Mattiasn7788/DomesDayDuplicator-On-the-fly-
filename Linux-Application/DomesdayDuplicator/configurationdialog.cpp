@@ -138,7 +138,7 @@ void ConfigurationDialog::loadConfiguration(const Configuration& configuration)
         sampleRateIndex = 2;  // 1/4 rate
     } else {
         ui->captureFormatComboBox->setCurrentIndex(ui->captureFormatComboBox->findData(static_cast<unsigned int>(configFormat)));
-        sampleRateIndex = 0;  // Full rate
+        sampleRateIndex = configuration.getSampleRate();  // Use stored sample rate
     }
     
     ui->sampleRateComboBox->setCurrentIndex(sampleRateIndex);
@@ -231,21 +231,29 @@ void ConfigurationDialog::saveConfiguration(Configuration& configuration)
         // else keep as sixteenBitSigned (full rate)
     }
     // Handle FLAC format - choose between ldfCompressed and flacDirect based on output format
+    // Also apply sample rate selection to FLAC formats
     else if (baseFormat == Configuration::CaptureFormat::flacDirect) {
         if (flacOutputFormat == 1) {
-            finalFormat = Configuration::CaptureFormat::ldfCompressed;  // .ldf output
+            // .ldf output - always use ldfCompressed for now
+            finalFormat = Configuration::CaptureFormat::ldfCompressed;
         } else {
-            finalFormat = Configuration::CaptureFormat::flacDirect;     // .flac output
+            // .flac output - apply sample rate downsampling to flacDirect
+            if (sampleRateIndex == 1) {
+                // Store sample rate preference in configuration for MainWindow to use
+                // We'll create new FLAC format variants for downsampling
+                finalFormat = Configuration::CaptureFormat::flacDirect;  // Keep base format
+            } else if (sampleRateIndex == 2) {
+                finalFormat = Configuration::CaptureFormat::flacDirect;  // Keep base format
+            } else {
+                finalFormat = Configuration::CaptureFormat::flacDirect;  // Full rate
+            }
         }
-        
-        // Apply sample rate to FLAC format by creating downsampled versions
-        // Note: For now, we'll capture at full rate and apply downsampling in software
-        // The sample rate selection for FLAC will be handled in the capture logic
     }
     
     configuration.setCaptureFormat(finalFormat);
     configuration.setFlacCompressionLevel(ui->flacCompressionLevelComboBox->itemData(ui->flacCompressionLevelComboBox->currentIndex()).toInt());
     configuration.setFlacOutputFormat(ui->flacOutputFormatComboBox->currentIndex());
+    configuration.setSampleRate(sampleRateIndex);
 
     // USB
     configuration.setUsbVid(static_cast<quint16>(ui->vendorIdLineEdit->text().toInt()));

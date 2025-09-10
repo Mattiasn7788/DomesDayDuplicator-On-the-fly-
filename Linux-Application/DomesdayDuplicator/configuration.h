@@ -73,6 +73,8 @@ public:
     int getFlacCompressionLevel() const;
     void setFlacOutputFormat(int format);
     int getFlacOutputFormat() const;
+    void setSampleRate(int sampleRate);
+    int getSampleRate() const;
     void setUsbVid(quint16 vid);
     quint16 getUsbVid() const;
     void setUsbPid(quint16 pid);
@@ -131,6 +133,7 @@ private:
         CaptureFormat captureFormat;
         int flacCompressionLevel;
         int flacOutputFormat;  // 0 = .flac, 1 = .ldf
+        int sampleRate;  // 0 = 40 MSPS, 1 = 20 MSPS, 2 = 10 MSPS
     };
 
     struct Usb {

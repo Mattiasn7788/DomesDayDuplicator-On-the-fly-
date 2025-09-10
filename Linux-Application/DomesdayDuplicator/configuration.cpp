@@ -65,6 +65,7 @@ void Configuration::writeConfiguration()
     configuration->setValue("captureFormat", convertCaptureFormatToInt(settings.capture.captureFormat));
     configuration->setValue("flacCompressionLevel", settings.capture.flacCompressionLevel);
     configuration->setValue("flacOutputFormat", settings.capture.flacOutputFormat);
+    configuration->setValue("sampleRate", settings.capture.sampleRate);
     configuration->endGroup();
 
     // UI
@@ -121,6 +122,7 @@ void Configuration::readConfiguration()
     settings.capture.captureFormat = convertIntToCaptureFormat(configuration->value("captureFormat").toInt());
     settings.capture.flacCompressionLevel = configuration->value("flacCompressionLevel", 5).toInt(); // Default to level 5
     settings.capture.flacOutputFormat = configuration->value("flacOutputFormat", 0).toInt(); // Default to .flac
+    settings.capture.sampleRate = configuration->value("sampleRate", 0).toInt(); // Default to 40 MSPS
     configuration->endGroup();
 
     // UI
@@ -171,6 +173,7 @@ void Configuration::setDefault()
     settings.capture.captureFormat = CaptureFormat::tenBitPacked;
     settings.capture.flacCompressionLevel = 5; // Default to moderate compression
     settings.capture.flacOutputFormat = 0; // Default to .flac output
+    settings.capture.sampleRate = 0; // Default to 40 MSPS (full rate)
 
     // UI
     settings.ui.perSideNotesEnabled = false;
@@ -304,6 +307,16 @@ void Configuration::setFlacOutputFormat(int format)
 int Configuration::getFlacOutputFormat() const
 {
     return settings.capture.flacOutputFormat;
+}
+
+void Configuration::setSampleRate(int sampleRate)
+{
+    settings.capture.sampleRate = sampleRate;
+}
+
+int Configuration::getSampleRate() const
+{
+    return settings.capture.sampleRate;
 }
 
 // USB settings
