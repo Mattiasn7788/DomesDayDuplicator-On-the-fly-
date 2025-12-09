@@ -1,6 +1,6 @@
 # Domesday Duplicator (DdD)
 
-Please see the [Project Wiki](https://github.com/simoninns/DomesdayDuplicator/wiki) for details of the project and for access to the project documentation.
+Please see the [Project Wiki](https://github.com/harrypm/DomesdayDuplicator/wiki) for details of the project and for access to the project documentation.
 
 <img src="https://user-images.githubusercontent.com/56382624/183899501-a1914f3f-0710-4095-8f0e-b84e6d266d1c.png" width="400" height="">
 
