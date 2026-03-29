@@ -1,9 +1,7 @@
 name: Compact Windows Build
 on: [push, pull_request]
-
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -35,32 +33,21 @@ jobs:
           EXE_PATH=$(find . -name "DomesdayDuplicator.exe")
           cp "$EXE_PATH" .
 
-          # 2. Run windeployqt
+          # 2. Run windeployqt for basic Qt structure
           windeployqt --release --no-translations --no-opengl-sw --no-system-d3d-compiler DomesdayDuplicator.exe
 
-          # 3. Copy ALL dependencies (Hardware/Processing/Missing)
-          # FFmpeg/Hardware Acceleration
+          # 3. AUTOMATICALLY copy all required DLLs (including libbz2, libfreetype, etc.)
+          # This finds every dependency linked to the EXE and copies it from /ucrt64/bin
+          ldd DomesdayDuplicator.exe | grep /ucrt64 | awk '{print $3}' | xargs -I {} cp -n {} .
+          
+          # Manually grab any wildcard plugins windeployqt might miss
           cp /ucrt64/bin/avcodec-*.dll .
           cp /ucrt64/bin/avutil-*.dll .
           cp /ucrt64/bin/swresample-*.dll .
           cp /ucrt64/bin/swscale-*.dll .
           cp /ucrt64/bin/libva*.dll .
           cp /ucrt64/bin/libvpl*.dll .
-          cp /ucrt64/bin/libsoxr.dll .
-          
-          # Core Systems & Hardware
-          cp /ucrt64/bin/libusb-1.0.dll .
-          cp /ucrt64/bin/libgomp-1.dll .
-          cp /ucrt64/bin/zlib1.dll .
-          cp /ucrt64/bin/libgcc_s_seh-1.dll .
-          cp /ucrt64/bin/libstdc++-6.dll .
-          cp /ucrt64/bin/libwinpthread-1.dll .
-          
-          # Qt6 Internal requirements
           cp /ucrt64/bin/libicu*.dll .
-          cp /ucrt64/bin/libdouble-conversion.dll .
-          cp /ucrt64/bin/libb2-1.dll .
-          cp /ucrt64/bin/libpcre2-16-0.dll .
 
           # 4. FINAL CLEANUP: Only keep 'platforms' and 'styles' folders
           find . -maxdepth 1 -type d ! -name 'platforms' ! -name 'styles' ! -path "." -exec rm -rf {} +
