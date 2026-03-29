@@ -9,7 +9,6 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Setup MSYS2
         uses: msys2/setup-msys2@v2
         with:
@@ -24,7 +23,6 @@ jobs:
             mingw-w64-ucrt-x86_64-libusb
             mingw-w64-ucrt-x86_64-flac
             make
-
       - name: Build & Package
         shell: msys2 {0}
         run: |
@@ -32,10 +30,17 @@ jobs:
           ar rcs /ucrt64/lib/libdl.a
           cmake .. -G "MSYS Makefiles" -DBUILD_SHARED_LIBS=OFF
           make
+          
+          # Find the executable and move it to the current build folder
+          EXE_PATH=$(find . -name "DomesdayDuplicator.exe")
+          cp "$EXE_PATH" .
+          
+          # Run deployment tool on the local copy
           windeployqt --no-translations --no-opengl-sw DomesdayDuplicator.exe
           cp /ucrt64/bin/*.dll .
+          
+          # Clean up unwanted utilities to keep the zip small
           rm -f dddconv.exe dddutil.exe
-
       - name: Upload Windows Build
         uses: actions/upload-artifact@v4
         with:
