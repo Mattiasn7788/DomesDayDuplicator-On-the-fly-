@@ -28,23 +28,27 @@ jobs:
         shell: msys2 {0}
         run: |
           mkdir -p build && cd build
-          ar rcs /ucrt64/lib/libdl.a 
+          # Dummy library to satisfy linker
+          ar rcs /ucrt64/lib/libdl.a
           cmake .. -G "MSYS Makefiles" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
           make -j$(nproc)
 
+          # 1. Locate and move the executable
           EXE_PATH=$(find . -name "DomesdayDuplicator.exe")
           cp "$EXE_PATH" .
 
+          # 2. Run windeployqt for core Qt files
           windeployqt --release --no-translations --no-opengl-sw DomesdayDuplicator.exe
 
-          # FFmpeg Cores with wildcards
+          # 3. Copy FFmpeg Cores (Directly to handle wildcards properly)
           cp /ucrt64/bin/swresample-*.dll .
           cp /ucrt64/bin/avcodec-*.dll .
           cp /ucrt64/bin/avformat-*.dll .
           cp /ucrt64/bin/avutil-*.dll .
           cp /ucrt64/bin/swscale-*.dll .
+          cp /ucrt64/bin/libvpl*.dll .
 
-          # Full dependency list
+          # 4. Full dependency list (Static names)
           DEPS=(
             "libgcc_s_seh-1.dll" "libstdc++-6.dll" "libwinpthread-1.dll"
             "libusb-1.0.dll" "libiconv-2.dll" "libintl-8.dll" "libzstd.dll"
@@ -52,15 +56,21 @@ jobs:
             "libglib-2.0-0.dll" "libgraphite2.dll" "libbz2-1.dll"
             "libdouble-conversion.dll" "libmd4c.dll" "libb2-1.dll"
             "libpcre2-16-0.dll" "libpcre2-8-0.dll" "libbrotlicommon.dll"
-            "libbrotlidec.dll" "libicudt*.dll" "libicuin*.dll" "libicuuc*.dll"
-            "libsoxr.dll" "libva.dll" "libva_win32.dll" "libvpl*.dll"
+            "libbrotlidec.dll" "libsoxr.dll" "libva.dll" "libva_win32.dll"
           )
 
           for dll in "${DEPS[@]}"; do
             cp /ucrt64/bin/$dll .
           done
 
+          # 5. Handle ICU wildcards separately to ensure expansion
+          cp /ucrt64/bin/libicudt*.dll .
+          cp /ucrt64/bin/libicuin*.dll .
+          cp /ucrt64/bin/libicuuc*.dll .
+
+          # Clean up any accidental extras
           rm -f dddconv.exe dddutil.exe
+
       - name: Upload Windows Build
         uses: actions/upload-artifact@v4
         with:
