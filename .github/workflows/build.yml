@@ -36,10 +36,10 @@ jobs:
         run: |
           mkdir -p build && cd build
 
-          # Aggressive static linking attempt
+          # Improved linker flags - keep winpthread dynamic for now (safer with time functions)
           cmake .. -G "MSYS Makefiles" -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++ \
-              -Wl,-Bstatic -lwinpthread -lusb-1.0 -lz -lbcrypt -lws2_32 -ladvapi32 \
+              -Wl,-Bstatic -lusb-1.0 -lz -lbcrypt -lws2_32 -ladvapi32 \
               -Wl,--start-group -lsoxr -Wl,--end-group -Wl,-Bdynamic" \
             -DZLIB_LIBRARY=/ucrt64/lib/libz.a \
             -DLIBUSB_1_LIBRARY=/ucrt64/lib/libusb-1.0.a \
@@ -56,7 +56,7 @@ jobs:
           fi
           cp "$EXE_PATH" DomesdayDuplicator.exe
 
-          # Deploy Qt dependencies (cleaner flags for Qt6)
+          # Qt deployment (Qt6 safe flags)
           echo "Running windeployqt6..."
           windeployqt6 --release \
                        --no-translations \
@@ -64,11 +64,11 @@ jobs:
                        --no-system-d3d-compiler \
                        DomesdayDuplicator.exe
 
-          # Collect remaining DLLs via ldd
+          # Collect ALL dependencies via ldd
           echo "Collecting DLLs via ldd..."
           ldd DomesdayDuplicator.exe | grep -E '/ucrt64/' | awk '{print $3}' | xargs -I {} cp -n "{}" . 2>/dev/null || true
 
-          # Manually copy hard-to-eliminate libraries (FFmpeg, ICU, VPL, etc.)
+          # Manual copies for FFmpeg + hardware accel + ICU
           cp -n /ucrt64/bin/avcodec-*.dll     . 2>/dev/null || true
           cp -n /ucrt64/bin/avutil-*.dll      . 2>/dev/null || true
           cp -n /ucrt64/bin/swresample-*.dll  . 2>/dev/null || true
@@ -80,14 +80,13 @@ jobs:
           cp -n /ucrt64/bin/libvpl*.dll       . 2>/dev/null || true
           cp -n /ucrt64/bin/libva*.dll        . 2>/dev/null || true
 
-          # Qt plugins - only the essentials
+          # Qt platform plugins
           mkdir -p platforms styles
           cp -n /ucrt64/share/qt6/plugins/platforms/qwindows.dll platforms/ 2>/dev/null || true
           cp -n /ucrt64/share/qt6/plugins/styles/qwindowsvistastyle.dll styles/ 2>/dev/null || true
 
-          # Remove DLLs we successfully linked statically
-          rm -f libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll \
-                libusb-1.0.dll zlib1.dll 2>/dev/null || true
+          # IMPORTANT: Do NOT remove these - they are often still needed
+          # rm -f libwinpthread-1.dll   # commented out on purpose
 
           # Final cleanup
           find . -maxdepth 1 -type d ! -name 'platforms' ! -name 'styles' ! -path "." -exec rm -rf {} +
