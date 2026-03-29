@@ -25,22 +25,21 @@ jobs:
             mingw-w64-ucrt-x86_64-qt6-base
             mingw-w64-ucrt-x86_64-qt6-serialport
             mingw-w64-ucrt-x86_64-ffmpeg
-            mingw-w64-ucrt-x86_64-libvpl
             mingw-w64-ucrt-x86_64-libusb
             mingw-w64-ucrt-x86_64-flac
             mingw-w64-ucrt-x86_64-libsoxr
             make
 
-      - name: Build & Package (Compact + FLAC + Downsampling)
+      - name: Build & Package (Compact for USB3 RF Capture)
         shell: msys2 {0}
         run: |
           mkdir -p build && cd build
 
-          # Strong static linking + size optimization
+          # Strong size optimization for USB3 RF capture app
           cmake .. -G "MSYS Makefiles" -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++ \
               -Wl,-Bstatic -lz -lbcrypt -lws2_32 -ladvapi32 -luser32 -lgdi32 -lwinmm -lsynchronization \
-              -Wl,--start-group -lsoxr -Wl,--end-group \
+              -Wl,--start-group -lsoxr -lflac -Wl,--end-group \
               -Wl,-Bdynamic -Wl,--gc-sections" \
             -DZLIB_LIBRARY=/ucrt64/lib/libz.a \
             -DLIBUSB_1_LIBRARY=/ucrt64/lib/libusb-1.0.a \
@@ -65,33 +64,30 @@ jobs:
                        --no-system-d3d-compiler \
                        DomesdayDuplicator.exe
 
-          # Collect runtime dependencies
+          # Collect required DLLs
           echo "Collecting DLLs via ldd..."
           ldd DomesdayDuplicator.exe | grep -E '/ucrt64/' | awk '{print $3}' | xargs -I {} cp -n "{}" . 2>/dev/null || true
 
-          # === Keep only what's needed for FLAC + downsampling ===
-          # Core audio: avutil, swresample (for downsampling), swscale (often needed), flac support via libflac
+          # === Minimal FFmpeg for FLAC + resampling only ===
           cp -n /ucrt64/bin/avutil-*.dll      . 2>/dev/null || true
-          cp -n /ucrt64/bin/swresample-*.dll  . 2>/dev/null || true
-          cp -n /ucrt64/bin/swscale-*.dll     . 2>/dev/null || true
+          cp -n /ucrt64/bin/swresample-*.dll  . 2>/dev/null || true   # down-sampling
+          cp -n /ucrt64/bin/swscale-*.dll     . 2>/dev/null || true   # often pulled by Qt or FFmpeg
 
-          # Optional but often required with FLAC workflow
-          cp -n /ucrt64/bin/avcodec-*.dll     . 2>/dev/null || true   # remove this line later if you can test without it
-          cp -n /ucrt64/bin/avformat-*.dll    . 2>/dev/null || true
+          # Keep avcodec/avformat only if FLAC encoding needs them (test without first)
+          # cp -n /ucrt64/bin/avcodec-*.dll     . 2>/dev/null || true
+          # cp -n /ucrt64/bin/avformat-*.dll    . 2>/dev/null || true
 
-          cp -n /ucrt64/bin/libvpl*.dll       . 2>/dev/null || true
-
-          # Qt plugins
+          # Qt plugins (only essentials for GUI)
           mkdir -p platforms styles
           cp -n /ucrt64/share/qt6/plugins/platforms/qwindows.dll platforms/ 2>/dev/null || true
           cp -n /ucrt64/share/qt6/plugins/styles/qwindowsvistastyle.dll styles/ 2>/dev/null || true
 
-          # Remove libraries we managed to static-link or don't need
+          # Remove unnecessary small libraries
           rm -f libgcc_s_seh-1.dll libstdc++-6.dll zlib1.dll libgomp-1.dll \
                 libb2-1.dll libbrotli*.dll libbz2-1.dll libdouble-conversion.dll \
                 libmd4c.dll libpcre2-*.dll libintl-8.dll libiconv-2.dll \
                 libgraphite2.dll libharfbuzz-0.dll libfreetype-6.dll \
-                libpng16-16.dll libglib-2.0-0.dll 2>/dev/null || true
+                libpng16-16.dll libglib-2.0-0.dll libva*.dll libvpl*.dll 2>/dev/null || true
 
           # Final cleanup
           find . -maxdepth 1 -type d ! -name 'platforms' ! -name 'styles' ! -path "." -exec rm -rf {} +
