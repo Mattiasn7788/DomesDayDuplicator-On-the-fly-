@@ -48,8 +48,8 @@ jobs:
             "libdouble-conversion.dll" "libmd4c.dll" "libb2-1.dll" 
             "libpcre2-16-0.dll" "libpcre2-8-0.dll" "libbrotlicommon.dll" 
             "libbrotlidec.dll" "libicudt78.dll" "libicuin78.dll" "libicuuc78.dll"
-            "swresample-6.dll"
-            "avcodec-61.dll"
+            "swresample-*.dll"
+            "avcodec-*.dll"
           )
           
           for dll in "${DEPS[@]}"; do
