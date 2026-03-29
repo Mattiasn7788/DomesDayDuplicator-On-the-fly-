@@ -28,18 +28,33 @@ jobs:
         run: |
           mkdir -p build && cd build
           ar rcs /ucrt64/lib/libdl.a
-          cmake .. -G "MSYS Makefiles" -DBUILD_SHARED_LIBS=OFF
-          make
+          cmake .. -G "MSYS Makefiles" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
+          make -j$(nproc)
           
-          # Find the executable and move it to the current build folder
+          # 1. Locate and move the executable
           EXE_PATH=$(find . -name "DomesdayDuplicator.exe")
           cp "$EXE_PATH" .
           
-          # Run deployment tool on the local copy
-          windeployqt --no-translations --no-opengl-sw DomesdayDuplicator.exe
-          cp /ucrt64/bin/*.dll .
+          # 2. Run windeployqt to get the core Qt files (Core, Gui, Widgets, etc.)
+          windeployqt --release --no-translations --no-opengl-sw DomesdayDuplicator.exe
           
-          # Clean up unwanted utilities to keep the zip small
+          # 3. MANUALLY copy the specific non-Qt dependencies from your list
+          # This ensures we get exactly what works on your desktop
+          DEPS=(
+            "libgcc_s_seh-1.dll" "libstdc++-6.dll" "libwinpthread-1.dll" 
+            "libusb-1.0.dll" "libiconv-2.dll" "libintl-8.dll" "libzstd.dll" 
+            "libpng16-16.dll" "libharfbuzz-0.dll" "libfreetype-6.dll" 
+            "libglib-2.0-0.dll" "libgraphite2.dll" "libbz2-1.dll" 
+            "libdouble-conversion.dll" "libmd4c.dll" "libb2-1.dll" 
+            "libpcre2-16-0.dll" "libpcre2-8-0.dll" "libbrotlicommon.dll" 
+            "libbrotlidec.dll" "libicudt78.dll" "libicuin78.dll" "libicuuc78.dll"
+          )
+          
+          for dll in "${DEPS[@]}"; do
+            cp "/ucrt64/bin/$dll" .
+          done
+          
+          # 4. Clean up any accidental extras
           rm -f dddconv.exe dddutil.exe
       - name: Upload Windows Build
         uses: actions/upload-artifact@v4
