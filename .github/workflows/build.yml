@@ -31,20 +31,21 @@ jobs:
             mingw-w64-ucrt-x86_64-libsoxr
             make
 
-      - name: Build & Package
+      - name: Build & Package (Closer to local compact build)
         shell: msys2 {0}
         run: |
           mkdir -p build && cd build
 
-          # Improved linker flags - keep winpthread dynamic for now (safer with time functions)
+          # Much more aggressive static linking
           cmake .. -G "MSYS Makefiles" -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++ \
-              -Wl,-Bstatic -lusb-1.0 -lz -lbcrypt -lws2_32 -ladvapi32 \
+              -Wl,-Bstatic -lwinpthread -lusb-1.0 -lz -lbcrypt -lws2_32 -ladvapi32 -luser32 -lgdi32 -lwinmm -lsynchronization \
               -Wl,--start-group -lsoxr -Wl,--end-group -Wl,-Bdynamic" \
             -DZLIB_LIBRARY=/ucrt64/lib/libz.a \
             -DLIBUSB_1_LIBRARY=/ucrt64/lib/libusb-1.0.a \
-            -DCMAKE_CXX_FLAGS="-static-libgcc -static-libstdc++" \
-            -DCMAKE_C_FLAGS="-static-libgcc"
+            -DCMAKE_CXX_FLAGS="-static-libgcc -static-libstdc++ -ffunction-sections -fdata-sections" \
+            -DCMAKE_C_FLAGS="-static-libgcc -ffunction-sections -fdata-sections" \
+            -DCMAKE_EXE_LINKER_FLAGS_INIT="-Wl,--gc-sections"
 
           make -j$(nproc)
 
@@ -56,7 +57,7 @@ jobs:
           fi
           cp "$EXE_PATH" DomesdayDuplicator.exe
 
-          # Qt deployment (Qt6 safe flags)
+          # Minimal Qt deployment
           echo "Running windeployqt6..."
           windeployqt6 --release \
                        --no-translations \
@@ -64,33 +65,32 @@ jobs:
                        --no-system-d3d-compiler \
                        DomesdayDuplicator.exe
 
-          # Collect ALL dependencies via ldd
-          echo "Collecting DLLs via ldd..."
+          # Collect dependencies via ldd
+          echo "Collecting remaining DLLs via ldd..."
           ldd DomesdayDuplicator.exe | grep -E '/ucrt64/' | awk '{print $3}' | xargs -I {} cp -n "{}" . 2>/dev/null || true
 
-          # Manual copies for FFmpeg + hardware accel + ICU
+          # Only essential manual copies (FFmpeg is the biggest pain)
           cp -n /ucrt64/bin/avcodec-*.dll     . 2>/dev/null || true
           cp -n /ucrt64/bin/avutil-*.dll      . 2>/dev/null || true
           cp -n /ucrt64/bin/swresample-*.dll  . 2>/dev/null || true
           cp -n /ucrt64/bin/swscale-*.dll     . 2>/dev/null || true
           cp -n /ucrt64/bin/avformat-*.dll    . 2>/dev/null || true
-          cp -n /ucrt64/bin/avfilter-*.dll    . 2>/dev/null || true
 
-          cp -n /ucrt64/bin/libicu*.dll       . 2>/dev/null || true
+          cp -n /ucrt64/bin/libicu*.dll       . 2>/dev/null || true   # ICU is huge - hard to avoid
           cp -n /ucrt64/bin/libvpl*.dll       . 2>/dev/null || true
-          cp -n /ucrt64/bin/libva*.dll        . 2>/dev/null || true
 
-          # Qt platform plugins
+          # Qt plugins
           mkdir -p platforms styles
           cp -n /ucrt64/share/qt6/plugins/platforms/qwindows.dll platforms/ 2>/dev/null || true
           cp -n /ucrt64/share/qt6/plugins/styles/qwindowsvistastyle.dll styles/ 2>/dev/null || true
 
-          # IMPORTANT: Do NOT remove these - they are often still needed
-          # rm -f libwinpthread-1.dll   # commented out on purpose
+          # Remove what we managed to static-link (like in your local build)
+          rm -f libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll \
+                zlib1.dll libusb-1.0.dll libsoxr.dll 2>/dev/null || true
 
           # Final cleanup
           find . -maxdepth 1 -type d ! -name 'platforms' ! -name 'styles' ! -path "." -exec rm -rf {} +
-          rm -f dddconv.exe dddutil.exe 2>/dev/null || true
+          rm -f dddconv.exe dddutil.exe CMakeCache.txt Makefile cmake_install.cmake 2>/dev/null || true
 
           echo "=== Final package contents ==="
           ls -la
