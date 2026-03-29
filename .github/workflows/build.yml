@@ -31,29 +31,37 @@ jobs:
           cmake .. -G "MSYS Makefiles" -DCMAKE_BUILD_TYPE=Release
           make -j$(nproc)
 
-          # 1. Move EXE to root
+          # 1. Isolate the EXE
           EXE_PATH=$(find . -name "DomesdayDuplicator.exe")
           cp "$EXE_PATH" .
 
-          # 2. Aggressive windeployqt (prevents hundreds of extra files)
+          # 2. Run windeployqt with aggressive pruning
           windeployqt --release --no-translations --no-opengl-sw --no-system-d3d-compiler DomesdayDuplicator.exe
 
-          # 3. Add ONLY the "Must-Have" Hardware/Processing DLLs
+          # 3. Manually copy ONLY the hardware/processing essentials & missing sub-deps
           cp /ucrt64/bin/libusb-1.0.dll .
           cp /ucrt64/bin/libgomp-1.dll .
           cp /ucrt64/bin/zlib1.dll .
-          cp /ucrt64/bin/swresample-*.dll .
-          cp /ucrt64/bin/avcodec-*.dll .
-          cp /ucrt64/bin/avutil-*.dll .
-          cp /ucrt64/bin/swscale-*.dll .
           cp /ucrt64/bin/libgcc_s_seh-1.dll .
           cp /ucrt64/bin/libstdc++-6.dll .
           cp /ucrt64/bin/libwinpthread-1.dll .
+          
+          # FFmpeg/Audio essentials
+          cp /ucrt64/bin/avcodec-*.dll .
+          cp /ucrt64/bin/avutil-*.dll .
+          cp /ucrt64/bin/swresample-*.dll .
+          cp /ucrt64/bin/swscale-*.dll .
+          cp /ucrt64/bin/libsoxr.dll .
+          
+          # Qt6 Core dependencies
+          cp /ucrt64/bin/libicu*.dll .
+          cp /ucrt64/bin/libdouble-conversion.dll .
+          cp /ucrt64/bin/libb2-1.dll .
 
           # 4. FINAL CLEANUP: Only keep 'platforms' and 'styles' folders
-          # This deletes the translations, imageformats, tls, and network folders.
-          find . -maxdepth 1 -type d ! -name 'platforms' ! -name 'styles' ! -name '.' -exec rm -rf {} +
-          
+          # The ! -path "." ensures we don't delete the root build directory
+          find . -maxdepth 1 -type d ! -name 'platforms' ! -name 'styles' ! -path "." -exec rm -rf {} +
+
           # Remove tool EXEs that aren't the main app
           rm -f dddconv.exe dddutil.exe
 
