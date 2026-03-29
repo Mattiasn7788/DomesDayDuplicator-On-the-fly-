@@ -1,12 +1,19 @@
 name: Compact Windows Build
+
 on: [push, pull_request]
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build-windows:
     runs-on: windows-latest
+
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
       - name: Setup MSYS2
         uses: msys2/setup-msys2@v2
         with:
@@ -23,38 +30,80 @@ jobs:
             mingw-w64-ucrt-x86_64-flac
             mingw-w64-ucrt-x86_64-libsoxr
             make
+
       - name: Build & Package
         shell: msys2 {0}
         run: |
           mkdir -p build && cd build
-          # FIXED: Used --start-group to force the linker to resolve FFmpeg, soxr, and bcrypt dependencies
+
+          # Aggressive static linking
           cmake .. -G "MSYS Makefiles" -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++ -Wl,-Bstatic -lpthread -lwinpthread -Wl,--start-group -lsoxr -lbcrypt -Wl,--end-group" \
+            -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++ \
+              -Wl,-Bstatic -lwinpthread -lusb-1.0 -lz -lbcrypt -lws2_32 -ladvapi32 \
+              -Wl,--start-group -lsoxr -Wl,--end-group -Wl,-Bdynamic" \
             -DZLIB_LIBRARY=/ucrt64/lib/libz.a \
-            -DLIBUSB_1_LIBRARY=/ucrt64/lib/libusb-1.0.a
+            -DLIBUSB_1_LIBRARY=/ucrt64/lib/libusb-1.0.a \
+            -DCMAKE_CXX_FLAGS="-static-libgcc -static-libstdc++" \
+            -DCMAKE_C_FLAGS="-static-libgcc"
+
           make -j$(nproc)
-          
-          # Isolate and package
-          EXE_PATH=$(find . -name "DomesdayDuplicator.exe")
-          cp "$EXE_PATH" .
-          windeployqt --release --no-translations --no-opengl-sw --no-system-d3d-compiler .
-          ldd DomesdayDuplicator.exe | grep /ucrt64 | awk '{print $3}' | xargs -I {} cp -n {} .
-          
-          # Manually grab hardware acceleration
-          cp /ucrt64/bin/avcodec-*.dll .
-          cp /ucrt64/bin/avutil-*.dll .
-          cp /ucrt64/bin/swresample-*.dll .
-          cp /ucrt64/bin/swscale-*.dll .
-          cp /ucrt64/bin/libva*.dll .
-          cp /ucrt64/bin/libvpl*.dll .
-          cp /ucrt64/bin/libicu*.dll .
-          
-          # Final Cleanup
-          rm -f libusb-1.0.dll zlib1.dll libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll
+
+          # Copy executable
+          EXE_PATH=$(find . -name "DomesdayDuplicator.exe" | head -n1)
+          if [ -z "$EXE_PATH" ]; then
+            echo "Error: DomesdayDuplicator.exe not found!"
+            exit 1
+          fi
+          cp "$EXE_PATH" DomesdayDuplicator.exe
+
+          # Deploy minimal Qt dependencies
+          windeployqt6 --release \
+                       --no-translations \
+                       --no-opengl-sw \
+                       --no-system-d3d-compiler \
+                       --no-angle \
+                       --no-virtualkeyboard \
+                       --no-quick \
+                       DomesdayDuplicator.exe
+
+          # Collect remaining DLLs
+          echo "Collecting DLLs via ldd..."
+          ldd DomesdayDuplicator.exe | grep -E '/ucrt64/' | awk '{print $3}' | xargs -I {} cp -n "{}" . 2>/dev/null || true
+
+          # Manually copy hard-to-static libraries
+          cp -n /ucrt64/bin/avcodec-*.dll     . 2>/dev/null || true
+          cp -n /ucrt64/bin/avutil-*.dll      . 2>/dev/null || true
+          cp -n /ucrt64/bin/swresample-*.dll  . 2>/dev/null || true
+          cp -n /ucrt64/bin/swscale-*.dll     . 2>/dev/null || true
+          cp -n /ucrt64/bin/avformat-*.dll    . 2>/dev/null || true
+          cp -n /ucrt64/bin/avfilter-*.dll    . 2>/dev/null || true
+
+          cp -n /ucrt64/bin/libicu*.dll       . 2>/dev/null || true
+          cp -n /ucrt64/bin/libvpl*.dll       . 2>/dev/null || true
+          cp -n /ucrt64/bin/libva*.dll        . 2>/dev/null || true
+
+          # Qt plugins (only what's really needed)
+          mkdir -p platforms styles
+          cp -n /ucrt64/share/qt6/plugins/platforms/qwindows.dll platforms/ 2>/dev/null || true
+          cp -n /ucrt64/share/qt6/plugins/styles/qwindowsvistastyle.dll styles/ 2>/dev/null || true
+
+          # Final cleanup - remove common DLLs we managed to link statically
+          echo "Removing successfully statically linked DLLs..."
+          rm -f libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll \
+                libusb-1.0.dll zlib1.dll 2>/dev/null || true
+
+          # Aggressive folder cleanup
           find . -maxdepth 1 -type d ! -name 'platforms' ! -name 'styles' ! -path "." -exec rm -rf {} +
-          rm -f dddconv.exe dddutil.exe
+          rm -f dddconv.exe dddutil.exe 2>/dev/null || true
+
+          echo "=== Final build contents ==="
+          ls -la
+          echo "Executable size:"
+          ls -lh DomesdayDuplicator.exe
+
       - name: Upload Windows Build
         uses: actions/upload-artifact@v4
         with:
           name: DomesdayDuplicator-Compact-Windows
           path: build/
+          retention-days: 7
