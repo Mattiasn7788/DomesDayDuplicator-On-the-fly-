@@ -1,0 +1,10 @@
+{
+	"InstallScripts" : 
+	[
+		"C:/msys64/home/Mattias/DomesdayDuplicator/Linux-Application/build/cmake_install.cmake",
+		"C:/msys64/home/Mattias/DomesdayDuplicator/Linux-Application/build/DomesdayDuplicator/cmake_install.cmake",
+		"C:/msys64/home/Mattias/DomesdayDuplicator/Linux-Application/build/dddconv/cmake_install.cmake",
+		"C:/msys64/home/Mattias/DomesdayDuplicator/Linux-Application/build/dddutil/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
