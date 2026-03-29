@@ -5,7 +5,7 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  build-windows:
+    build-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -15,11 +15,7 @@ jobs:
         with:
           msystem: UCRT64
           update: true
-          # Caching is enabled by default in msys2/setup-msys2@v2
           install: >-
-            mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake
-            mingw-w64-ucrt-x86_64-qt6-base mingw-w64-ucrt-x86_64-ffmpeg
-            mingw-w64-ucrt-x86_64-libusb mingw-w64-ucrt-x86_64-flac make
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-qt6-base
@@ -28,26 +24,21 @@ jobs:
             mingw-w64-ucrt-x86_64-libusb
             mingw-w64-ucrt-x86_64-flac
             make
+
       - name: Build & Package
         shell: msys2 {0}
         run: |
-                    mkdir -p build && cd build
-          # The Windows 'fake' libdl fix
-          ar rcs /ucrt64/lib/libdl.a 
+          mkdir -p build && cd build
+          ar rcs /ucrt64/lib/libdl.a
           cmake .. -G "MSYS Makefiles" -DBUILD_SHARED_LIBS=OFF
           make
-          
-          # 1. Standard Qt deployment
           windeployqt --no-translations --no-opengl-sw DomesdayDuplicator.exe
-          
-          # 2. THE MASTER FIX: Copy all required C++ and System DLLs 
-          # This ensures it works exactly like your 'DomesdayRelease' folder
-          cp /ucrt64/bin/*.dll . 
-          
-          # 3. Clean up (Optional: keeps the zip small by removing unrelated apps)
-          rm -f dddconv.exe dddutil.exe 
+          cp /ucrt64/bin/*.dll .
+          rm -f dddconv.exe dddutil.exe
+
       - name: Upload Windows Build
         uses: actions/upload-artifact@v4
         with:
           name: DomesdayDuplicator-Windows
-          path: build/DomesdayDuplicator/
+          path: build/
+
