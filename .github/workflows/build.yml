@@ -26,24 +26,25 @@ jobs:
         shell: msys2 {0}
         run: |
           mkdir -p build && cd build
-          # FORCE CMake to use the static (.a) files for zlib and libusb
+          # FORCE static paths for core libs to match Mattias's local 4340kb build
+          # Explicitly link pthread and winpthread to fix clock_gettime64/nanosleep64 errors
           cmake .. -G "MSYS Makefiles" -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++ -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic -lbcrypt -ladvapi32" \
+            -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++ -Wl,-Bstatic -lpthread -lwinpthread -Wl,-Bdynamic -lbcrypt -ladvapi32" \
             -DZLIB_LIBRARY=/ucrt64/lib/libz.a \
             -DLIBUSB_1_LIBRARY=/ucrt64/lib/libusb-1.0.a
           make -j$(nproc)
           
-          # 1. Isolate the EXE (Should be ~4340kb now)
+          # 1. Isolate the EXE (Targeting ~4340kb size)
           EXE_PATH=$(find . -name "DomesdayDuplicator.exe")
           cp "$EXE_PATH" .
           
           # 2. Run windeployqt
           windeployqt --release --no-translations --no-opengl-sw --no-system-d3d-compiler DomesdayDuplicator.exe
           
-          # 3. Copy remaining dynamic dependencies
+          # 3. Copy remaining dynamic dependencies (Qt, FFmpeg, ICU)
           ldd DomesdayDuplicator.exe | grep /ucrt64 | awk '{print $3}' | xargs -I {} cp -n {} .
           
-          # Manually grab FFmpeg and hardware acceleration
+          # Manually grab hardware acceleration wildcards
           cp /ucrt64/bin/avcodec-*.dll .
           cp /ucrt64/bin/avutil-*.dll .
           cp /ucrt64/bin/swresample-*.dll .
@@ -52,7 +53,7 @@ jobs:
           cp /ucrt64/bin/libvpl*.dll .
           cp /ucrt64/bin/libicu*.dll .
           
-          # 4. FINAL CLEANUP: Remove files now merged into the EXE
+          # 4. FINAL CLEANUP: Remove files now baked into the 4340kb EXE
           rm -f libusb-1.0.dll zlib1.dll libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll
           
           # Remove build leftovers
