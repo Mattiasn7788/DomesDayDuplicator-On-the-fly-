@@ -78,7 +78,7 @@ jobs:
           cp -n /ucrt64/share/qt6/plugins/platforms/qwindows.dll platforms/ 2>/dev/null || true
           cp -n /ucrt64/share/qt6/plugins/styles/qwindowsvistastyle.dll styles/ 2>/dev/null || true
 
-          # Cleanup - keep only .exe, .dll, platforms and styles
+          # Cleanup - keep only .exe + .dll + platforms + styles
           find . -maxdepth 1 -type f ! -name "*.exe" ! -name "*.dll" -delete
           find . -maxdepth 1 -type d ! -name "." ! -name "platforms" ! -name "styles" -exec rm -rf {} +
 
@@ -87,9 +87,11 @@ jobs:
           echo "Executable size:"
           ls -lh DomesdayDuplicator.exe
 
-          # Create clean zip (no nested build folder)
+          # Create clean zip (files directly in root of zip)
           cd ..
-          zip -9 -r DomesdayDuplicator-Windows.zip build/*
+          cd build
+          zip -9 -r ../../DomesdayDuplicator-Windows.zip ./*
+          cd ../..
           ls -lh DomesdayDuplicator-Windows.zip
 
       - name: Upload Windows Build
