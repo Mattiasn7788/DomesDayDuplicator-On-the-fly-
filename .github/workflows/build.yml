@@ -81,17 +81,8 @@ jobs:
 
           echo "=== FINAL CONTENTS ==="
           ls -la
-          echo "Executable size:"
-          ls -lh DomesdayDuplicator.exe
 
-          # Create clean zip (no nested build folder)
+          # === FIXED: Create clean zip directly ===
           cd ..
-          zip -9 -r DomesdayDuplicator-Windows.zip build/
+          zip -9 -r DomesdayDuplicator-Windows.zip build/* --exclude "build/build/*"
           ls -lh DomesdayDuplicator-Windows.zip
-
-      - name: Upload Windows Build
-        uses: actions/upload-artifact@v4
-        with:
-          name: DomesdayDuplicator-Compact-Windows
-          path: DomesdayDuplicator-Windows.zip
-          retention-days: 0
