@@ -23,7 +23,6 @@ jobs:
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-qt6-base
-            mingw-w64-ucrt-x86_64-qt6-tools
             mingw-w64-ucrt-x86_64-qt6-serialport
             mingw-w64-ucrt-x86_64-ffmpeg
             mingw-w64-ucrt-x86_64-libvpl
