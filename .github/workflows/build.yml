@@ -57,7 +57,7 @@ jobs:
           # Collect DLLs
           ldd DomesdayDuplicator.exe | grep -E '/ucrt64/' | awk '{print $3}' | xargs -I {} cp -n "{}" . 2>/dev/null || true
 
-          # Critical small DLLs
+          # Critical DLLs
           cp -n /ucrt64/bin/libgcc_s_seh-1.dll      . 2>/dev/null || true
           cp -n /ucrt64/bin/libzstd.dll             . 2>/dev/null || true
           cp -n /ucrt64/bin/libbrotlidec.dll        . 2>/dev/null || true
@@ -72,16 +72,21 @@ jobs:
           cp -n /ucrt64/share/qt6/plugins/platforms/qwindows.dll platforms/ 2>/dev/null || true
           cp -n /ucrt64/share/qt6/plugins/styles/qwindowsvistastyle.dll styles/ 2>/dev/null || true
 
-          # Cleanup
+          # Remove unwanted files
+          rm -f zlib1.dll 2>/dev/null || true
+
+          # Final cleanup
           find . -maxdepth 1 -type f ! -name "*.exe" ! -name "*.dll" -delete
           find . -maxdepth 1 -type d ! -name "." ! -name "platforms" ! -name "styles" -exec rm -rf {} +
 
           echo "=== FINAL CONTENTS ==="
           ls -la
 
-          # === Create zip reliably ===
+          # Create clean zip - files directly at root (no build/ folder)
           cd ..
-          zip -9 -r DomesdayDuplicator-Windows.zip build/*
+          cd build
+          zip -9 -r ../../DomesdayDuplicator-Windows.zip ./*
+          cd ../..
           ls -lh DomesdayDuplicator-Windows.zip
 
       - name: Upload Windows Build
