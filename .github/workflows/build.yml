@@ -47,22 +47,19 @@ jobs:
 
           make -j$(nproc)
 
-          # Copy executable
           cp "$(find . -name "DomesdayDuplicator.exe" | head -n1)" DomesdayDuplicator.exe || true
 
-          # Deploy Qt
           windeployqt6 --release --no-translations --no-opengl-sw --no-system-d3d-compiler DomesdayDuplicator.exe
 
-          # Collect DLLs
           ldd DomesdayDuplicator.exe | grep -E '/ucrt64/' | awk '{print $3}' | xargs -I {} cp -n "{}" . 2>/dev/null || true
 
-          # The 4 critical DLLs you need
+          # The 4 critical DLLs
           cp -n /ucrt64/bin/libgcc_s_seh-1.dll      . 2>/dev/null || true
           cp -n /ucrt64/bin/libzstd.dll             . 2>/dev/null || true
           cp -n /ucrt64/bin/libbrotlidec.dll        . 2>/dev/null || true
           cp -n /ucrt64/bin/libbrotlicommon.dll     . 2>/dev/null || true
 
-          # FFmpeg and other important libraries
+          # FFmpeg and extra libs
           cp -n /ucrt64/bin/avcodec-*.dll     . 2>/dev/null || true
           cp -n /ucrt64/bin/avutil-*.dll      . 2>/dev/null || true
           cp -n /ucrt64/bin/swresample-*.dll  . 2>/dev/null || true
@@ -76,7 +73,7 @@ jobs:
           cp -n /ucrt64/share/qt6/plugins/platforms/qwindows.dll platforms/ 2>/dev/null || true
           cp -n /ucrt64/share/qt6/plugins/styles/qwindowsvistastyle.dll styles/ 2>/dev/null || true
 
-          # Final cleanup
+          # Cleanup
           find . -maxdepth 1 -type f ! -name "*.exe" ! -name "*.dll" -delete
           find . -maxdepth 1 -type d ! -name "." ! -name "platforms" ! -name "styles" -exec rm -rf {} +
 
@@ -87,9 +84,9 @@ jobs:
           echo "Executable size:"
           ls -lh DomesdayDuplicator.exe
 
-          # Create zip in repository root
+          # Create clean zip (no nested build folder)
           cd ..
-          zip -9 -r DomesdayDuplicator-Windows.zip build/*
+          zip -9 -r DomesdayDuplicator-Windows.zip build/
           ls -lh DomesdayDuplicator-Windows.zip
 
       - name: Upload Windows Build
@@ -97,4 +94,4 @@ jobs:
         with:
           name: DomesdayDuplicator-Compact-Windows
           path: DomesdayDuplicator-Windows.zip
-          retention-days: 30
+          retention-days: 0
