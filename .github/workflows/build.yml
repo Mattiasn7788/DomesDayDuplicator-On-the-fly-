@@ -36,7 +36,6 @@ jobs:
         run: |
           mkdir -p build && cd build
 
-          # Build
           cmake .. -G "MSYS Makefiles" -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++ -Wl,-Bstatic -lwinpthread -lz -Wl,-Bdynamic" \
             -DZLIB_LIBRARY=/ucrt64/lib/libz.a \
@@ -44,28 +43,28 @@ jobs:
 
           make -j$(nproc)
 
-          # Copy executable
-          EXE_PATH=$(find . -name "DomesdayDuplicator.exe" | head -n1)
-          cp "$EXE_PATH" DomesdayDuplicator.exe
+          cp "$(find . -name "DomesdayDuplicator.exe" | head -n1)" DomesdayDuplicator.exe
 
-          # Deploy Qt
           windeployqt6 --release --no-translations --no-opengl-sw --no-system-d3d-compiler DomesdayDuplicator.exe
 
-          # Copy all required DLLs
+          # Copy required DLLs
           ldd DomesdayDuplicator.exe | grep -E '/ucrt64/' | awk '{print $3}' | xargs -I {} cp -n "{}" . 2>/dev/null || true
 
-          # Extra safety copies
+          # Required for capture
           cp -n /ucrt64/bin/avutil-*.dll      . 2>/dev/null || true
           cp -n /ucrt64/bin/swresample-*.dll  . 2>/dev/null || true
-          cp -n /ucrt64/bin/swscale-*.dll     . 2>/dev/null || true
 
-          # Qt plugins - only these two folders
+          # Qt plugins
           mkdir -p platforms styles
           cp -n /ucrt64/share/qt6/plugins/platforms/qwindows.dll platforms/ 2>/dev/null || true
           cp -n /ucrt64/share/qt6/plugins/styles/qwindowsvistastyle.dll styles/ 2>/dev/null || true
 
-          # Final aggressive cleanup - keep ONLY exe, dlls, platforms and styles
-          find . -maxdepth 1 -type f ! -name "DomesdayDuplicator.exe" ! -name "*.dll" -delete
+          # Remove only the files you confirmed are safe to delete
+          rm -f libbrotlicommon.dll libbrotlidec.dll libgcc_s_seh-1.dll \
+                libzstd.dll swscale-9.dll zlib1.dll 2>/dev/null || true
+
+          # Final cleanup - keep only .exe + .dll + platforms + styles
+          find . -maxdepth 1 -type f ! -name "*.exe" ! -name "*.dll" -delete
           find . -maxdepth 1 -type d ! -name "." ! -name "platforms" ! -name "styles" -exec rm -rf {} +
 
           echo "=== FINAL CONTENTS ==="
@@ -73,7 +72,7 @@ jobs:
           echo "Executable size:"
           ls -lh DomesdayDuplicator.exe
 
-          # Create zip (single zip, clean name)
+          # Create clean zip
           zip -9 -r DomesdayDuplicator-Windows.zip ./*
 
       - name: Upload ZIP
