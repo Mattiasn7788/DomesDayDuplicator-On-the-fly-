@@ -75,21 +75,16 @@ jobs:
           # Remove unwanted file
           rm -f zlib1.dll 2>/dev/null || true
 
-          # Cleanup
+          # Final cleanup
           find . -maxdepth 1 -type f ! -name "*.exe" ! -name "*.dll" -delete
           find . -maxdepth 1 -type d ! -name "." ! -name "platforms" ! -name "styles" -exec rm -rf {} +
 
           echo "=== FINAL CONTENTS ==="
           ls -la
 
-          # === Reliable zip creation - no double zip, no nested build folder ===
-          cd ..
-          zip -9 -r DomesdayDuplicator-Windows.zip build/* -x "build/build/*"
-          ls -lh DomesdayDuplicator-Windows.zip
-
       - name: Upload Windows Build
         uses: actions/upload-artifact@v4
         with:
           name: DomesdayDuplicator-Compact-Windows
-          path: DomesdayDuplicator-Windows.zip
+          path: build/
           retention-days: 0
