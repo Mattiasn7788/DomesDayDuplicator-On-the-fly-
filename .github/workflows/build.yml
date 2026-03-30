@@ -79,9 +79,11 @@ jobs:
           echo "=== FINAL CONTENTS ==="
           ls -la
 
-          # Create zip in root directory
+          # Create clean zip - files directly in root (this is the line that worked for you)
           cd ..
-          zip -9 -r DomesdayDuplicator_Flac+DownSampling.zip build/*
+          cd build
+          zip -9 -r ../../DomesdayDuplicator_Flac+DownSampling.zip ./*
+          cd ../..
           ls -lh DomesdayDuplicator_Flac+DownSampling.zip
 
       - name: Create Release
