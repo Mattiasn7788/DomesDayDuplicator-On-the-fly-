@@ -40,7 +40,7 @@ ConfigurationDialog::ConfigurationDialog(QWidget *parent) :
 
     // Build the captureFormatComboBox
     ui->captureFormatComboBox->clear();
-    ui->captureFormatComboBox->addItem("16-bit FLAC", Configuration::CaptureFormat::flacDirect);
+    ui->captureFormatComboBox->addItem("8-bit FLAC", Configuration::CaptureFormat::flacDirect);
     ui->captureFormatComboBox->addItem("16-bit Signed Raw", Configuration::CaptureFormat::sixteenBitSigned);
     ui->captureFormatComboBox->addItem("10-bit Packed Unsigned", Configuration::CaptureFormat::tenBitPacked);
     
@@ -707,6 +707,7 @@ void ConfigurationDialog::onCaptureFormatChanged(int index)
 
     if (selectedFormat == Configuration::CaptureFormat::flacDirect) {
         // FLAC via ffmpeg soxr — any rate works; offer all useful RF digitisation rates
+        ui->sampleRateComboBox->addItem("40 MSPS",                40000);
         ui->sampleRateComboBox->addItem("28 MSPS",                28000);
         ui->sampleRateComboBox->addItem("24 MSPS (S-VHS/Video8)", 24000);
         ui->sampleRateComboBox->addItem("20 MSPS (recommended)",  20000);

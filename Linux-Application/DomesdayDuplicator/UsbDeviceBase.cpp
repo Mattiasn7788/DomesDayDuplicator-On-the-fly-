@@ -175,11 +175,22 @@ bool UsbDeviceBase::StartCapture(const std::filesystem::path& filePath, CaptureF
             return false;
         }
 
+        // Look for ffmpeg.exe and flac.exe next to our own exe first, then fall back to PATH
+        char exePath[MAX_PATH] = {};
+        GetModuleFileNameA(NULL, exePath, MAX_PATH);
+        std::string exeDir = std::string(exePath);
+        auto lastSlash = exeDir.find_last_of("\\/");
+        exeDir = (lastSlash != std::string::npos) ? exeDir.substr(0, lastSlash + 1) : "";
+        std::string ffmpegLocal = exeDir + "ffmpeg.exe";
+        std::string flacLocal   = exeDir + "flac.exe";
+        std::string ffmpegCmd = std::filesystem::exists(ffmpegLocal) ? ("\"" + ffmpegLocal + "\"") : "ffmpeg";
+        std::string flacCmd   = std::filesystem::exists(flacLocal)   ? ("\"" + flacLocal   + "\"") : "flac";
+
         // flac writes to stdout (-c), which we capture via the stdout pipe
-        std::string cmd = std::string("ffmpeg -hide_banner -loglevel error -f s16le -ar 40000000 -ac 1 -i pipe:0 ")
+        std::string cmd = ffmpegCmd + " -hide_banner -loglevel error -f s16le -ar 40000000 -ac 1 -i pipe:0 "
             + "-af aresample=" + std::to_string(outputSampleRate) + ":resampler=soxr:precision=28 "
             + "-sample_fmt u8 -f u8 - | "
-            + "flac -" + std::to_string(level) + " --bps=8 --sign=unsigned --channels=1 --endian=little "
+            + flacCmd + " -" + std::to_string(level) + " --bps=8 --sign=unsigned --channels=1 --endian=little "
             + "--sample-rate=" + std::to_string(flacSampleRate) + " "
             + "--no-seektable --force-raw-format -f -c -";
 #ifdef _WIN32
