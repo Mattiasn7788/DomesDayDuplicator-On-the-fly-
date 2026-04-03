@@ -133,7 +133,7 @@ private:
         CaptureFormat captureFormat;
         int flacCompressionLevel;
         int flacOutputFormat;  // 0 = .flac, 1 = .ldf
-        int sampleRate;  // 0 = 40 MSPS, 1 = 20 MSPS, 2 = 10 MSPS
+        int sampleRate;  // Output sample rate in kHz (e.g. 20000 = 20 MSPS). Default 20000.
     };
 
     struct Usb {

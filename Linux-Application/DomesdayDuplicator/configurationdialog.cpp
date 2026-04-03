@@ -44,11 +44,8 @@ ConfigurationDialog::ConfigurationDialog(QWidget *parent) :
     ui->captureFormatComboBox->addItem("16-bit Signed Raw", Configuration::CaptureFormat::sixteenBitSigned);
     ui->captureFormatComboBox->addItem("10-bit Packed Unsigned", Configuration::CaptureFormat::tenBitPacked);
     
-    // Build the sampleRateComboBox
+    // sampleRateComboBox is populated dynamically in onCaptureFormatChanged()
     ui->sampleRateComboBox->clear();
-    ui->sampleRateComboBox->addItem("40 MSPS (Full Rate)", 0);
-    ui->sampleRateComboBox->addItem("20 MSPS (1/2 Rate)", 1);
-    ui->sampleRateComboBox->addItem("10 MSPS (1/4 Rate)", 2);
     
     // Build the flacOutputFormatComboBox
     ui->flacOutputFormatComboBox->clear();
@@ -127,21 +124,23 @@ void ConfigurationDialog::loadConfiguration(const Configuration& configuration)
     
     // Handle capture format and sample rate loading
     Configuration::CaptureFormat configFormat = configuration.getCaptureFormat();
-    int sampleRateIndex = 0;  // Default to full rate
-    
-    // Map combined formats to separate format + sample rate
+    int storedSampleRateKHz = configuration.getSampleRate(); // kHz value
+
+    // Map combined raw formats to base format (sample rate already stored as kHz)
     if (configFormat == Configuration::CaptureFormat::sixteenBitSigned_Half) {
         ui->captureFormatComboBox->setCurrentIndex(ui->captureFormatComboBox->findData(static_cast<unsigned int>(Configuration::CaptureFormat::sixteenBitSigned)));
-        sampleRateIndex = 1;  // 1/2 rate
+        storedSampleRateKHz = 20000;
     } else if (configFormat == Configuration::CaptureFormat::sixteenBitSigned_Quarter) {
         ui->captureFormatComboBox->setCurrentIndex(ui->captureFormatComboBox->findData(static_cast<unsigned int>(Configuration::CaptureFormat::sixteenBitSigned)));
-        sampleRateIndex = 2;  // 1/4 rate
+        storedSampleRateKHz = 10000;
     } else {
         ui->captureFormatComboBox->setCurrentIndex(ui->captureFormatComboBox->findData(static_cast<unsigned int>(configFormat)));
-        sampleRateIndex = configuration.getSampleRate();  // Use stored sample rate
     }
-    
-    ui->sampleRateComboBox->setCurrentIndex(sampleRateIndex);
+
+    // onCaptureFormatChanged() already rebuilt the combo — find item by kHz data value
+    int sampleRateItemIndex = ui->sampleRateComboBox->findData(storedSampleRateKHz);
+    if (sampleRateItemIndex < 0) sampleRateItemIndex = 0;  // fallback to first item
+    ui->sampleRateComboBox->setCurrentIndex(sampleRateItemIndex);
     ui->flacCompressionLevelComboBox->setCurrentIndex(ui->flacCompressionLevelComboBox->findData(configuration.getFlacCompressionLevel()));
     ui->flacOutputFormatComboBox->setCurrentIndex(configuration.getFlacOutputFormat());
 
@@ -216,44 +215,32 @@ void ConfigurationDialog::saveConfiguration(Configuration& configuration)
     
     // Combine capture format and sample rate into final format
     Configuration::CaptureFormat baseFormat = static_cast<Configuration::CaptureFormat>(ui->captureFormatComboBox->itemData(ui->captureFormatComboBox->currentIndex()).toInt());
-    int sampleRateIndex = ui->sampleRateComboBox->currentIndex();
+    int sampleRateKHz = ui->sampleRateComboBox->currentData().toInt(); // stored as kHz
     int flacOutputFormat = ui->flacOutputFormatComboBox->currentIndex();
-    
+
     Configuration::CaptureFormat finalFormat = baseFormat;
-    
-    // Handle 16-bit signed raw format with sample rate
+
+    // For 16-bit raw: encode sample rate into the format enum (backward compat)
     if (baseFormat == Configuration::CaptureFormat::sixteenBitSigned) {
-        if (sampleRateIndex == 1) {
+        if (sampleRateKHz == 20000) {
             finalFormat = Configuration::CaptureFormat::sixteenBitSigned_Half;
-        } else if (sampleRateIndex == 2) {
+        } else if (sampleRateKHz == 10000) {
             finalFormat = Configuration::CaptureFormat::sixteenBitSigned_Quarter;
         }
-        // else keep as sixteenBitSigned (full rate)
+        // else keep as sixteenBitSigned (40 MSPS full rate)
     }
-    // Handle FLAC format - choose between ldfCompressed and flacDirect based on output format
-    // Also apply sample rate selection to FLAC formats
+    // For FLAC: choose ldfCompressed vs flacDirect based on output format dropdown
     else if (baseFormat == Configuration::CaptureFormat::flacDirect) {
         if (flacOutputFormat == 1) {
-            // .ldf output - always use ldfCompressed for now
             finalFormat = Configuration::CaptureFormat::ldfCompressed;
-        } else {
-            // .flac output - apply sample rate downsampling to flacDirect
-            if (sampleRateIndex == 1) {
-                // Store sample rate preference in configuration for MainWindow to use
-                // We'll create new FLAC format variants for downsampling
-                finalFormat = Configuration::CaptureFormat::flacDirect;  // Keep base format
-            } else if (sampleRateIndex == 2) {
-                finalFormat = Configuration::CaptureFormat::flacDirect;  // Keep base format
-            } else {
-                finalFormat = Configuration::CaptureFormat::flacDirect;  // Full rate
-            }
         }
+        // else stay as flacDirect; sample rate stored separately as kHz
     }
-    
+
     configuration.setCaptureFormat(finalFormat);
     configuration.setFlacCompressionLevel(ui->flacCompressionLevelComboBox->itemData(ui->flacCompressionLevelComboBox->currentIndex()).toInt());
     configuration.setFlacOutputFormat(ui->flacOutputFormatComboBox->currentIndex());
-    configuration.setSampleRate(sampleRateIndex);
+    configuration.setSampleRate(sampleRateKHz); // store actual kHz
 
     // USB
     configuration.setUsbVid(static_cast<quint16>(ui->vendorIdLineEdit->text().toInt()));
@@ -698,17 +685,45 @@ void ConfigurationDialog::onCaptureFormatChanged(int index)
     
     // Show FLAC-related controls only for FLAC format
     bool showFlacControls = (selectedFormat == Configuration::CaptureFormat::flacDirect);
-    
+
     ui->flacCompressionLabel->setVisible(showFlacControls);
     ui->flacCompressionLevelComboBox->setVisible(showFlacControls);
     ui->flacOutputFormatLabel->setVisible(showFlacControls);
     ui->flacOutputFormatComboBox->setVisible(showFlacControls);
-    
+
     // Show sample rate control for 16-bit formats (both raw and FLAC)
     bool showSampleRateControls = (selectedFormat == Configuration::CaptureFormat::sixteenBitSigned ||
-                                  selectedFormat == Configuration::CaptureFormat::flacDirect);
+                                   selectedFormat == Configuration::CaptureFormat::flacDirect);
     ui->sampleRateLabel->setVisible(showSampleRateControls);
     ui->sampleRateComboBox->setVisible(showSampleRateControls);
+
+    if (!showSampleRateControls)
+        return;
+
+    // Rebuild sample rate combo with format-appropriate options (stored as kHz)
+    int prevKHz = ui->sampleRateComboBox->currentData().toInt();
+    ui->sampleRateComboBox->blockSignals(true);
+    ui->sampleRateComboBox->clear();
+
+    if (selectedFormat == Configuration::CaptureFormat::flacDirect) {
+        // FLAC via ffmpeg soxr — any rate works; offer all useful RF digitisation rates
+        ui->sampleRateComboBox->addItem("28 MSPS",                28000);
+        ui->sampleRateComboBox->addItem("24 MSPS (S-VHS/Video8)", 24000);
+        ui->sampleRateComboBox->addItem("20 MSPS (recommended)",  20000);
+        ui->sampleRateComboBox->addItem("18 MSPS",                18000);
+        ui->sampleRateComboBox->addItem("16 MSPS",                16000);
+        ui->sampleRateComboBox->addItem("10 MSPS",                10000);
+    } else {
+        // Raw 16-bit — software downsampling supports integer fractions only
+        ui->sampleRateComboBox->addItem("40 MSPS (Full Rate)", 40000);
+        ui->sampleRateComboBox->addItem("20 MSPS (1/2 Rate)", 20000);
+        ui->sampleRateComboBox->addItem("10 MSPS (1/4 Rate)", 10000);
+    }
+
+    // Restore previous selection if available, else default to first item
+    int idx = ui->sampleRateComboBox->findData(prevKHz);
+    ui->sampleRateComboBox->setCurrentIndex(idx >= 0 ? idx : 0);
+    ui->sampleRateComboBox->blockSignals(false);
 }
 
 void ConfigurationDialog::onSampleRateChanged(int index)

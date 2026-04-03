@@ -122,7 +122,14 @@ void Configuration::readConfiguration()
     settings.capture.captureFormat = convertIntToCaptureFormat(configuration->value("captureFormat").toInt());
     settings.capture.flacCompressionLevel = configuration->value("flacCompressionLevel", 5).toInt(); // Default to level 5
     settings.capture.flacOutputFormat = configuration->value("flacOutputFormat", 0).toInt(); // Default to .flac
-    settings.capture.sampleRate = configuration->value("sampleRate", 0).toInt(); // Default to 40 MSPS
+    {
+        // Migrate old index-based values (0/1/2) to actual kHz values
+        int sr = configuration->value("sampleRate", 20000).toInt();
+        if      (sr == 0) sr = 40000;
+        else if (sr == 1) sr = 20000;
+        else if (sr == 2) sr = 10000;
+        settings.capture.sampleRate = sr;
+    }
     configuration->endGroup();
 
     // UI
@@ -173,7 +180,7 @@ void Configuration::setDefault()
     settings.capture.captureFormat = CaptureFormat::tenBitPacked;
     settings.capture.flacCompressionLevel = 5; // Default to moderate compression
     settings.capture.flacOutputFormat = 0; // Default to .flac output
-    settings.capture.sampleRate = 0; // Default to 40 MSPS (full rate)
+    settings.capture.sampleRate = 20000; // Default to 20 MSPS
 
     // UI
     settings.ui.perSideNotesEnabled = false;

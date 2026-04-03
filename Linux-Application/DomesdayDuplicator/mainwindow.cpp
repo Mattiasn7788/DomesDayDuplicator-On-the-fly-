@@ -26,6 +26,8 @@
 ************************************************************************/
 
 #include "mainwindow.h"
+#include <filesystem>
+#include <system_error>
 #include "ui_mainwindow.h"
 #include "UsbDeviceLibUsb.h"
 #ifdef _WIN32
@@ -477,6 +479,7 @@ void MainWindow::playerDisconnectedSignalHandler()
 void MainWindow::updateCaptureStatus()
 {
     // Update our transfer statistics. We update these even if a transfer is stopping or stopped.
+    // For FlacOnTheFly, GetFileSizeWrittenInBytes() returns actual FLAC bytes (tracked by the reader thread).
     size_t mbWritten = usbDevice->GetFileSizeWrittenInBytes() / (1024 * 1024);
     ui->dataCapturedLabel->setText(QString::number(mbWritten) + (tr(" MiB")));
     ui->numberOfTransfersLabel->setText(QString::number(usbDevice->GetNumberOfTransfers()));
@@ -676,8 +679,7 @@ void MainWindow::updateCaptureStatus()
 
         // Perform post-capture compression if needed (LDF/FLAC only)
         // Note: Downsampling formats are now processed in real-time during capture
-        if (configuration->getCaptureFormat() == Configuration::CaptureFormat::ldfCompressed ||
-            configuration->getCaptureFormat() == Configuration::CaptureFormat::flacDirect)
+        if (configuration->getCaptureFormat() == Configuration::CaptureFormat::ldfCompressed)
         {
             // For compressed formats, we need to process the raw 16-bit data
             // The capture was done to a temporary .s16 file, now we need to process it
@@ -1038,10 +1040,9 @@ void MainWindow::updateStorageInformation()
             bytesPerSecond = (samplesPerSecond * 2) / 2;
             break;
         case Configuration::CaptureFormat::flacDirect:
-            // Direct FLAC with moderate compression level
-            // Estimate ~60% of 16-bit size for storage calculation
-            // Note: For now, FLAC formats capture at full rate and apply downsampling in software
-            bytesPerSecond = (samplesPerSecond * 2) * 6 / 10;
+            // On-the-fly FLAC at the chosen sample rate, 8-bit.
+            // RF data typically achieves ~5% of uncompressed size with FLAC.
+            bytesPerSecond = static_cast<size_t>(configuration->getSampleRate()) * 1000 / 20;
             break;
         }
 
@@ -1317,18 +1318,11 @@ void MainWindow::StartCapture()
     }
     else if (configuration->getCaptureFormat() == Configuration::CaptureFormat::flacDirect)
     {
-        // For FLAC Direct, check the sample rate configuration
-        int sampleRate = configuration->getSampleRate();
-        if (sampleRate == 1) {
-            qDebug() << "MainWindow::StartCapture(): Starting transfer - 16-bit 1/2 rate (20 MSPS) FLAC Direct with real-time downsampling";
-            captureFormat = UsbDeviceBase::CaptureFormat::Signed16BitHalf;
-        } else if (sampleRate == 2) {
-            qDebug() << "MainWindow::StartCapture(): Starting transfer - 16-bit 1/4 rate (10 MSPS) FLAC Direct with real-time downsampling";
-            captureFormat = UsbDeviceBase::CaptureFormat::Signed16BitQuarter;
-        } else {
-            qDebug() << "MainWindow::StartCapture(): Starting transfer - 16-bit (40 MSPS) FLAC Direct";
-            captureFormat = UsbDeviceBase::CaptureFormat::Signed16Bit;
-        }
+        // For FLAC Direct, pipe raw s16le through ffmpeg+flac on-the-fly (no temp file)
+        // getSampleRate() returns the target output rate in kHz (e.g. 20000 = 20 MSPS)
+        captureFormat = UsbDeviceBase::CaptureFormat::Signed16BitFlacOnTheFly;
+        qDebug() << "MainWindow::StartCapture(): Starting transfer - FLAC Direct on-the-fly"
+                 << configuration->getSampleRate() / 1000 << "MSPS";
     }
     else
     {
@@ -1351,7 +1345,11 @@ void MainWindow::StartCapture()
 
     // Attempt to start the capture process
     qDebug() << "MainWindow::StartCapture(): Starting capture to file:" << captureFilePath;
-    if (!usbDevice->StartCapture(captureFilePath, captureFormat, configuration->getUsbPreferredDevice().toStdString(), isTestMode, useSmallUsbTransfers, useAsyncFileIo, maxUsbTransferQueueSizeInBytes, maxDiskBufferQueueSizeInBytes))
+    int flacLevel = (captureFormat == UsbDeviceBase::CaptureFormat::Signed16BitFlacOnTheFly)
+                    ? configuration->getFlacCompressionLevel() : 8;
+    int flacOutputSampleRateInHz = (captureFormat == UsbDeviceBase::CaptureFormat::Signed16BitFlacOnTheFly)
+                    ? configuration->getSampleRate() * 1000 : 20000000;
+    if (!usbDevice->StartCapture(captureFilePath, captureFormat, configuration->getUsbPreferredDevice().toStdString(), isTestMode, useSmallUsbTransfers, useAsyncFileIo, maxUsbTransferQueueSizeInBytes, maxDiskBufferQueueSizeInBytes, flacLevel, flacOutputSampleRateInHz))
     {
         // Show an error based on the transfer result
         qDebug() << "MainWindow::StartCapture(): Failed to begin the capture process";

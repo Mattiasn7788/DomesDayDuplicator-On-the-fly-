@@ -1,6 +1,78 @@
 #include "UsbDeviceBase.h"
 #ifdef _WIN32
 #include <memoryapi.h>
+#include <io.h>
+#include <fcntl.h>
+
+// Opens a cmd.exe pipe without showing a console window.
+// Returns the write-end FILE* (for ffmpeg stdin) and stores the process handle and
+// a read HANDLE for the process stdout (flac output).
+static FILE* openPipeNoWindow(const std::string& cmd, HANDLE& outProcess, HANDLE& outReadPipe)
+{
+    outProcess = INVALID_HANDLE_VALUE;
+    outReadPipe = INVALID_HANDLE_VALUE;
+
+    SECURITY_ATTRIBUTES sa = {};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+
+    // Stdin pipe: our process writes to hWrite, child reads from hRead
+    HANDLE hStdinRead, hStdinWrite;
+    if (!CreatePipe(&hStdinRead, &hStdinWrite, &sa, 0))
+        return nullptr;
+    SetHandleInformation(hStdinWrite, HANDLE_FLAG_INHERIT, 0); // write end is ours, non-inheritable
+
+    // Stdout pipe: child writes to hStdoutWrite, our process reads from hStdoutRead
+    HANDLE hStdoutRead, hStdoutWrite;
+    if (!CreatePipe(&hStdoutRead, &hStdoutWrite, &sa, 0))
+    {
+        CloseHandle(hStdinRead);
+        CloseHandle(hStdinWrite);
+        return nullptr;
+    }
+    SetHandleInformation(hStdoutRead, HANDLE_FLAG_INHERIT, 0); // read end is ours, non-inheritable
+
+    STARTUPINFOA si = {};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    si.hStdInput  = hStdinRead;
+    si.hStdOutput = hStdoutWrite;
+    si.hStdError  = GetStdHandle(STD_ERROR_HANDLE);
+
+    PROCESS_INFORMATION pi = {};
+    std::string fullCmd = "cmd.exe /c " + cmd;
+    BOOL ok = CreateProcessA(NULL, const_cast<char*>(fullCmd.c_str()),
+                             NULL, NULL, TRUE, CREATE_NO_WINDOW,
+                             NULL, NULL, &si, &pi);
+
+    // Close handles we passed to the child — child has its own copies
+    CloseHandle(hStdinRead);
+    CloseHandle(hStdoutWrite);
+
+    if (!ok)
+    {
+        CloseHandle(hStdinWrite);
+        CloseHandle(hStdoutRead);
+        return nullptr;
+    }
+
+    CloseHandle(pi.hThread);
+    outProcess = pi.hProcess;
+    outReadPipe = hStdoutRead;
+
+    int fd = _open_osfhandle(reinterpret_cast<intptr_t>(hStdinWrite), _O_WRONLY | _O_BINARY);
+    if (fd == -1)
+    {
+        CloseHandle(hStdinWrite);
+        CloseHandle(hStdoutRead);
+        CloseHandle(pi.hProcess);
+        outProcess = INVALID_HANDLE_VALUE;
+        outReadPipe = INVALID_HANDLE_VALUE;
+        return nullptr;
+    }
+    return _fdopen(fd, "wb");
+}
 #else
 #include <sched.h>
 #include <sys/mman.h>
@@ -63,7 +135,7 @@ void UsbDeviceBase::SendConfigurationCommand(const std::string& preferredDeviceP
 //----------------------------------------------------------------------------------------------------------------------
 // Capture methods
 //----------------------------------------------------------------------------------------------------------------------
-bool UsbDeviceBase::StartCapture(const std::filesystem::path& filePath, CaptureFormat format, const std::string& preferredDevicePath, bool isTestMode, bool useSmallUsbTransfers, bool useAsyncFileIo, size_t usbTransferQueueSizeInBytes, size_t diskBufferQueueSizeInBytes)
+bool UsbDeviceBase::StartCapture(const std::filesystem::path& filePath, CaptureFormat format, const std::string& preferredDevicePath, bool isTestMode, bool useSmallUsbTransfers, bool useAsyncFileIo, size_t usbTransferQueueSizeInBytes, size_t diskBufferQueueSizeInBytes, int flacCompressionLevel, int flacOutputSampleRateInHz)
 {
     // If we're already performing a capture, abort any further processing.
     if (transferInProgress)
@@ -85,34 +157,90 @@ bool UsbDeviceBase::StartCapture(const std::filesystem::path& filePath, CaptureF
     useWindowsOverlappedFileIo = useAsyncFileIo;
 #endif
 
-    // Attempt to create/open the output file
-#ifdef _WIN32
-    if (useWindowsOverlappedFileIo)
+    // Attempt to create/open the output file or pipe
+    if (format == CaptureFormat::Signed16BitFlacOnTheFly)
     {
-        windowsCaptureOutputFileHandle = CreateFileW(filePath.wstring().c_str(), GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_WRITE_THROUGH | FILE_FLAG_OVERLAPPED, NULL);
-        if (windowsCaptureOutputFileHandle == INVALID_HANDLE_VALUE)
-        {
-            DWORD lastError = GetLastError();
-            Log().Error("CreateFileW returned {0} with error code {1}.", windowsCaptureOutputFileHandle, lastError);
-            captureResult = TransferResult::FileCreationError;
-            return false;
-        }
-    }
-    else
-    {
-#endif
+        // Open an on-the-fly pipe: ffmpeg (s16le 40MSPS) → resample → u8 → flac → our stdout reader → file
+        int outputSampleRate = flacOutputSampleRateInHz;
+        int flacSampleRate   = flacOutputSampleRateInHz / 1000;
+        int level = (flacCompressionLevel >= 0 && flacCompressionLevel <= 8) ? flacCompressionLevel : 8;
+
+        // Open the output file ourselves so we can track FLAC bytes written
         captureOutputFile.clear();
-        captureOutputFile.rdbuf()->pubsetbuf(0, 0);
         captureOutputFile.open(filePath, std::ios::out | std::ios::trunc | std::ios::binary);
         if (!captureOutputFile.is_open())
         {
-            Log().Error("StartCapture(): Failed to create the output file at path {0}", filePath);
+            Log().Error("StartCapture(): Failed to create the FLAC output file at path {0}", filePath);
             captureResult = TransferResult::FileCreationError;
             return false;
         }
+
+        // flac writes to stdout (-c), which we capture via the stdout pipe
+        std::string cmd = std::string("ffmpeg -hide_banner -loglevel error -f s16le -ar 40000000 -ac 1 -i pipe:0 ")
+            + "-af aresample=" + std::to_string(outputSampleRate) + ":resampler=soxr:precision=28 "
+            + "-sample_fmt u8 -f u8 - | "
+            + "flac -" + std::to_string(level) + " --bps=8 --sign=unsigned --channels=1 --endian=little "
+            + "--sample-rate=" + std::to_string(flacSampleRate) + " "
+            + "--no-seektable --force-raw-format -f -c -";
 #ifdef _WIN32
-    }
+        flacPipeHandle = openPipeNoWindow(cmd, flacPipeProcess, flacReadPipeHandle);
+#else
+        flacPipeHandle = popen(cmd.c_str(), "w");
 #endif
+        if (flacPipeHandle == nullptr)
+        {
+            Log().Error("StartCapture(): Failed to open FLAC pipe");
+            captureOutputFile.close();
+            captureResult = TransferResult::FileCreationError;
+            return false;
+        }
+
+#ifdef _WIN32
+        // Start a background thread that reads flac's stdout and writes to the output file,
+        // so GetFileSizeWrittenInBytes() returns the actual compressed FLAC bytes in real time.
+        flacReaderThread = std::thread([this]() {
+            const DWORD bufSize = 65536;
+            std::vector<char> buf(bufSize);
+            DWORD bytesRead;
+            while (ReadFile(flacReadPipeHandle, buf.data(), bufSize, &bytesRead, NULL) && bytesRead > 0)
+            {
+                captureOutputFile.write(buf.data(), static_cast<std::streamsize>(bytesRead));
+                transferFileSizeWrittenInBytes += bytesRead;
+            }
+            captureOutputFile.flush();
+        });
+#endif
+    }
+    else
+    {
+#ifdef _WIN32
+        if (useWindowsOverlappedFileIo)
+        {
+            windowsCaptureOutputFileHandle = CreateFileW(filePath.wstring().c_str(), GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_WRITE_THROUGH | FILE_FLAG_OVERLAPPED, NULL);
+            if (windowsCaptureOutputFileHandle == INVALID_HANDLE_VALUE)
+            {
+                DWORD lastError = GetLastError();
+                Log().Error("CreateFileW returned {0} with error code {1}.", windowsCaptureOutputFileHandle, lastError);
+                captureResult = TransferResult::FileCreationError;
+                return false;
+            }
+        }
+        else
+        {
+#endif
+            captureOutputFile.clear();
+            captureOutputFile.rdbuf()->pubsetbuf(0, 0);
+            captureOutputFile.open(filePath, std::ios::out | std::ios::trunc | std::ios::binary);
+            if (!captureOutputFile.is_open())
+            {
+                Log().Error("StartCapture(): Failed to create the output file at path {0}", filePath);
+                captureResult = TransferResult::FileCreationError;
+                return false;
+            }
+#ifdef _WIN32
+        }
+#endif
+    }
 
     // Calculate the optimal read buffer size and number of disk buffers, and initialize the structures. We use an
     // unusual case of wrapping an array new into a unique_ptr rather than std::vector here, as we have an atomic_flag
@@ -195,24 +323,56 @@ void UsbDeviceBase::StopCapture()
 #endif
     diskBufferEntries.reset();
 
-    // Close the output file
-#ifdef _WIN32
-    if (useWindowsOverlappedFileIo)
+    // Close the output file or pipe
+    if (captureFormat == CaptureFormat::Signed16BitFlacOnTheFly)
     {
-        BOOL closeHandleReturn = CloseHandle(windowsCaptureOutputFileHandle);
-        if (closeHandleReturn == 0)
+        if (flacPipeHandle != nullptr)
         {
-            DWORD lastError = GetLastError();
-            Log().Error("CloseHandle failed with error code {0}.", lastError);
+#ifdef _WIN32
+            // Close stdin pipe → ffmpeg gets EOF → flac gets EOF → flac closes stdout pipe
+            fclose(flacPipeHandle);
+            flacPipeHandle = nullptr;
+            if (flacPipeProcess != INVALID_HANDLE_VALUE)
+            {
+                WaitForSingleObject(flacPipeProcess, INFINITE);
+                CloseHandle(flacPipeProcess);
+                flacPipeProcess = INVALID_HANDLE_VALUE;
+            }
+            // Drain any remaining bytes from flac stdout and close the file
+            if (flacReaderThread.joinable())
+                flacReaderThread.join();
+            if (flacReadPipeHandle != INVALID_HANDLE_VALUE)
+            {
+                CloseHandle(flacReadPipeHandle);
+                flacReadPipeHandle = INVALID_HANDLE_VALUE;
+            }
+            captureOutputFile.close();
+#else
+            pclose(flacPipeHandle);
+            flacPipeHandle = nullptr;
+#endif
         }
     }
     else
     {
-#endif
-        captureOutputFile.close();
 #ifdef _WIN32
-    }
+        if (useWindowsOverlappedFileIo)
+        {
+            BOOL closeHandleReturn = CloseHandle(windowsCaptureOutputFileHandle);
+            if (closeHandleReturn == 0)
+            {
+                DWORD lastError = GetLastError();
+                Log().Error("CloseHandle failed with error code {0}.", lastError);
+            }
+        }
+        else
+        {
 #endif
+            captureOutputFile.close();
+#ifdef _WIN32
+        }
+#endif
+    }
 
     // Disconnect from the target device
     DisconnectFromDevice();
@@ -245,6 +405,10 @@ void UsbDeviceBase::CaptureThread()
         break;
     case CaptureFormat::Unsigned10Bit4to1Decimation:
         requiredConversionBufferSize = (diskBufferSizeInBytes / (8 * 4)) * 5;
+        break;
+    case CaptureFormat::Signed16BitFlacOnTheFly:
+        // Full s16le at 40MSPS is piped to ffmpeg which handles downsampling
+        requiredConversionBufferSize = diskBufferSizeInBytes;
         break;
     }
 
@@ -669,7 +833,25 @@ void UsbDeviceBase::ProcessingThread()
                 continue;
             }
 
-            // Write the data to the output file
+            // Write the converted data to the pipe or output file
+            if (captureFormat == CaptureFormat::Signed16BitFlacOnTheFly)
+            {
+                // Write raw s16le data to the ffmpeg+flac pipe
+                size_t written = fwrite(currentConversionBuffer.data(), 1, currentConversionBuffer.size(), flacPipeHandle);
+                if (written != currentConversionBuffer.size())
+                {
+                    Log().Error("ProcessingThread(): Failed to write to FLAC pipe");
+                    SetProcessingFinished(TransferResult::FileWriteError);
+                    processingFailure = true;
+                    continue;
+                }
+                bufferEntry.isDiskBufferFull.clear();
+                bufferEntry.isDiskBufferFull.notify_all();
+                ++transferBufferWrittenCount;
+                // transferFileSizeWrittenInBytes is updated by the flac reader thread (FLAC bytes)
+            }
+            else
+            {
 #ifdef _WIN32
             if (useWindowsOverlappedFileIo)
             {
@@ -711,11 +893,12 @@ void UsbDeviceBase::ProcessingThread()
 #ifdef _WIN32
             }
 #endif
+            } // end else (not FlacOnTheFly)
         }
 
         // If we're using overlapped file IO, complete the previously submitted write operation.
 #ifdef _WIN32
-        if (useWindowsOverlappedFileIo)
+        if (useWindowsOverlappedFileIo && captureFormat != CaptureFormat::Signed16BitFlacOnTheFly)
         {
             // Retrive the previous disk buffer entry
             size_t lastBufferIndex = (currentDiskBuffer + (totalDiskBufferEntryCount - 1)) % totalDiskBufferEntryCount;
@@ -961,9 +1144,11 @@ bool UsbDeviceBase::ConvertRawSampleData(size_t diskBufferIndex, CaptureFormat c
 
     // Convert the data to the required format
     uint8_t* writeBufferPointer = outputBuffer.data();
-    if (captureFormat == CaptureFormat::Signed16Bit)
+    if (captureFormat == CaptureFormat::Signed16Bit
+        || captureFormat == CaptureFormat::Signed16BitFlacOnTheFly)
     {
         // Translate the data in the disk buffer to scaled 16-bit signed data
+        // (For FlacOnTheFly, the full-rate s16le stream is piped to ffmpeg for downsampling)
         for (size_t i = 0; i < readBufferSizeInBytes; i += 2)
         {
             // Get the original 10-bit unsigned value from the disk data buffer
@@ -1004,12 +1189,13 @@ bool UsbDeviceBase::ConvertRawSampleData(size_t diskBufferIndex, CaptureFormat c
         
         // Determine downsampling factor and initialize resampler if needed
         int downsampleFactor = (captureFormat == CaptureFormat::Signed16BitHalf) ? 2 : 4;
-        if (!audioResampler.isInitialized())
+        uint32_t inputSampleRate = 40000000;  // 40 MSPS
+        uint32_t outputSampleRate = inputSampleRate / downsampleFactor;
+
+        // Reinitialize if not yet initialized or if rate changed (e.g. second capture at a different rate)
+        if (!audioResampler.isInitialized() || audioResampler.getOutputSampleRate() != outputSampleRate)
         {
-            // Initialize resampler: 40 MSPS input, downsampled output
-            uint32_t inputSampleRate = 40000000;  // 40 MSPS
-            uint32_t outputSampleRate = inputSampleRate / downsampleFactor;
-            
+            audioResampler.cleanup();
             if (!audioResampler.initialize(inputSampleRate, outputSampleRate))
             {
                 Log().Error("ConvertRawSampleData(): Failed to initialize audio resampler for format {0}", (int)captureFormat);
