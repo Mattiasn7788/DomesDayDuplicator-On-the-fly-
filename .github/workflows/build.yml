@@ -73,8 +73,14 @@ jobs:
           cp -n /ucrt64/bin/libbrotlidec.dll . 2>/dev/null || true
           cp -n /ucrt64/bin/libbrotlicommon.dll . 2>/dev/null || true
 
-          cp -n /ucrt64/bin/avutil-*.dll . 2>/dev/null || true
-          cp -n /ucrt64/bin/swresample-*.dll . 2>/dev/null || true
+          # FFmpeg DLLs (lib-prefixed in MSYS2 UCRT64)
+          cp -n /ucrt64/bin/libavutil-*.dll . 2>/dev/null || true
+          cp -n /ucrt64/bin/libavcodec-*.dll . 2>/dev/null || true
+          cp -n /ucrt64/bin/libavformat-*.dll . 2>/dev/null || true
+          cp -n /ucrt64/bin/libavfilter-*.dll . 2>/dev/null || true
+          cp -n /ucrt64/bin/libswresample-*.dll . 2>/dev/null || true
+          cp -n /ucrt64/bin/libswscale-*.dll . 2>/dev/null || true
+          cp -n /ucrt64/bin/libsoxr-0.dll . 2>/dev/null || true
 
           # ffmpeg and flac executables (needed for 8-bit FLAC on-the-fly capture)
           cp -n /ucrt64/bin/ffmpeg.exe . 2>/dev/null || true
@@ -92,6 +98,9 @@ jobs:
 
           # Include GNURadio HiFi scripts
           cp -r ../GNURadio-Scripts ./GNURadio-Scripts
+
+          echo "=== VERIFY FFMPEG RUNS ==="
+          ./ffmpeg.exe -version || echo "WARNING: ffmpeg.exe failed to run - check DLLs!"
 
           echo "=== FINAL CONTENTS ==="
           ls -la
