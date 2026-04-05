@@ -175,16 +175,22 @@ bool UsbDeviceBase::StartCapture(const std::filesystem::path& filePath, CaptureF
             return false;
         }
 
-        // Look for ffmpeg.exe and flac.exe next to our own exe first, then fall back to PATH
-        char exePath[MAX_PATH] = {};
-        GetModuleFileNameA(NULL, exePath, MAX_PATH);
-        std::string exeDir = std::string(exePath);
-        auto lastSlash = exeDir.find_last_of("\\/");
-        exeDir = (lastSlash != std::string::npos) ? exeDir.substr(0, lastSlash + 1) : "";
-        std::string ffmpegLocal = exeDir + "ffmpeg.exe";
-        std::string flacLocal   = exeDir + "flac.exe";
-        std::string ffmpegCmd = std::filesystem::exists(ffmpegLocal) ? ("\"" + ffmpegLocal + "\"") : "ffmpeg";
-        std::string flacCmd   = std::filesystem::exists(flacLocal)   ? ("\"" + flacLocal   + "\"") : "flac";
+        // Look for ffmpeg/flac next to our own exe first, then fall back to PATH
+        std::string ffmpegCmd = "ffmpeg";
+        std::string flacCmd   = "flac";
+#ifdef _WIN32
+        {
+            char exePath[MAX_PATH] = {};
+            GetModuleFileNameA(NULL, exePath, MAX_PATH);
+            std::string exeDir = std::string(exePath);
+            auto lastSlash = exeDir.find_last_of("\\/");
+            exeDir = (lastSlash != std::string::npos) ? exeDir.substr(0, lastSlash + 1) : "";
+            std::string ffmpegLocal = exeDir + "ffmpeg.exe";
+            std::string flacLocal   = exeDir + "flac.exe";
+            if (std::filesystem::exists(ffmpegLocal)) ffmpegCmd = "\"" + ffmpegLocal + "\"";
+            if (std::filesystem::exists(flacLocal))   flacCmd   = "\"" + flacLocal   + "\"";
+        }
+#endif
 
         // flac writes to stdout (-c), which we capture via the stdout pipe
         std::string cmd = ffmpegCmd + " -hide_banner -loglevel error -f s16le -ar 40000000 -ac 1 -i pipe:0 "
