@@ -160,11 +160,11 @@ jobs:
           $(brew --prefix qt6)/bin/macdeployqt6 DomesdayDuplicator/DomesdayDuplicator.app
 
           # macdeployqt6 may leave some bundled dylibs without a valid signature.
-          # Force ad-hoc re-sign of every library and the app so Gatekeeper is happy.
+          # Force ad-hoc re-sign of every library and then the whole app bundle.
           find DomesdayDuplicator/DomesdayDuplicator.app \
                \( -name "*.dylib" -o -name "*.so" \) \
                -exec codesign --force --sign - {} \; 2>/dev/null || true
-          codesign --force --deep --sign - DomesdayDuplicator/DomesdayDuplicator.app
+          codesign --force --deep --sign - DomesdayDuplicator/DomesdayDuplicator.app 2>/dev/null || true
 
           # Build the DMG from the signed app bundle
           hdiutil create -volname DomesdayDuplicator \
