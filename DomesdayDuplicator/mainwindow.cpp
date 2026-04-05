@@ -1419,7 +1419,7 @@ void MainWindow::StartAudioCapture(const std::filesystem::path& rfFilePath)
 {
     // Build audio output path: same stem as RF file + "_audio.flac"
     // Use wstring throughout so non-ASCII characters in paths (e.g. Swedish ä) work correctly.
-    std::filesystem::path audioFilePath = rfFilePath.parent_path() / (rfFilePath.stem().string() + "_audio.flac");
+    std::filesystem::path audioFilePath = rfFilePath.parent_path() / (rfFilePath.stem().wstring() + L"_audio.flac");
 
     // Determine fmedia executable path
     std::wstring fmediaExeW;
@@ -1484,7 +1484,7 @@ void MainWindow::StartSdrCapture(const std::filesystem::path& rfFilePath)
 {
     // Build output base path: same stem + "_hifi"
     // Use wstring throughout so non-ASCII characters in paths (e.g. Swedish ä) work correctly.
-    std::filesystem::path outputBase = rfFilePath.parent_path() / (rfFilePath.stem().string() + "_hifi");
+    std::filesystem::path outputBase = rfFilePath.parent_path() / (rfFilePath.stem().wstring() + L"_hifi");
 
     // Determine radioconda root (python path is e.g. C:\ProgramData\radioconda\python.exe)
     QString configuredPython = configuration->getSdrPythonPath().trimmed();
