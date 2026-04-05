@@ -158,16 +158,44 @@ jobs:
           aqt install-qt mac desktop 6.5.3 clang_64 --outputdir ~/Qt -m qtserialport
           echo "QT_ROOT=$HOME/Qt/6.5.3/macos" >> $GITHUB_ENV
 
-      - name: Install other dependencies
+      - name: Install build dependencies
         run: |
-          brew install cmake libusb ffmpeg flac brotli webp
+          brew install cmake libusb flac brotli webp
+          # Note: ffmpeg is NOT installed from Homebrew — Homebrew's ffmpeg targets macOS 14.
+          # We build libavutil + libswresample from source with deployment target 11.0 below.
+
+      - name: Cache ffmpeg (macOS 11 compatible)
+        uses: actions/cache@v4
+        id: ffmpeg-cache
+        with:
+          path: ~/ffmpeg-compat
+          key: ffmpeg-7.1-macos11-x86_64-v1
+
+      - name: Build ffmpeg 7.1 with macOS 11 deployment target
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch n7.1 https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg-src
+          cd /tmp/ffmpeg-src
+          export MACOSX_DEPLOYMENT_TARGET=11.0
+          ./configure \
+            --prefix=$HOME/ffmpeg-compat \
+            --enable-shared --disable-static \
+            --disable-programs --disable-doc --disable-network \
+            --disable-avcodec --disable-avformat --disable-avfilter \
+            --disable-swscale --disable-postproc \
+            --enable-swresample --enable-avutil \
+            --disable-x86asm \
+            --extra-cflags="-mmacosx-version-min=11.0" \
+            --extra-ldflags="-mmacosx-version-min=11.0"
+          make -j$(sysctl -n hw.logicalcpu)
+          make install
 
       - name: Build & Package
         run: |
           mkdir -p build && cd build
 
-          # Tell pkg-config where Homebrew's ffmpeg and libusb libraries are
-          export PKG_CONFIG_PATH="$(brew --prefix ffmpeg)/lib/pkgconfig:$(brew --prefix libusb)/lib/pkgconfig:$PKG_CONFIG_PATH"
+          # Use our macOS 11 compatible ffmpeg, and Homebrew for libusb
+          export PKG_CONFIG_PATH="$HOME/ffmpeg-compat/lib/pkgconfig:$(brew --prefix libusb)/lib/pkgconfig:$PKG_CONFIG_PATH"
 
           cmake .. -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_PREFIX_PATH="$QT_ROOT" \
@@ -179,9 +207,19 @@ jobs:
           # macdeployqt may print rpath errors for optional Qt modules — harmless, use || true.
           $QT_ROOT/bin/macdeployqt DomesdayDuplicator/DomesdayDuplicator.app || true
 
+          APP_FW="DomesdayDuplicator/DomesdayDuplicator.app/Contents/Frameworks"
+
+          # Replace any ffmpeg dylibs macdeployqt may have copied with our macOS 11 builds.
+          # (macdeployqt follows the binary's load commands and copies whatever it finds.)
+          for lib in libavutil.60.dylib libswresample.6.dylib; do
+            src="$HOME/ffmpeg-compat/lib/$lib"
+            [ -f "$src" ] && cp -f "$src" "$APP_FW/" 2>/dev/null || true
+            [ -f "$APP_FW/$lib" ] && \
+              install_name_tool -id "@rpath/$lib" "$APP_FW/$lib" 2>/dev/null || true
+          done
+
           # Copy indirect dylib dependencies that macdeployqt fails to resolve
           # (libwebp/libsharpyuv pulled in by Qt image plugins, libbrotlicommon by freetype).
-          APP_FW="DomesdayDuplicator/DomesdayDuplicator.app/Contents/Frameworks"
           for lib in \
               "$(brew --prefix webp)/lib/libwebp.7.dylib" \
               "$(brew --prefix webp)/lib/libsharpyuv.0.dylib" \
