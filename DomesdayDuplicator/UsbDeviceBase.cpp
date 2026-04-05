@@ -202,6 +202,7 @@ bool UsbDeviceBase::StartCapture(const std::filesystem::path& filePath, CaptureF
             + "--sample-rate=" + std::to_string(flacSampleRate) + " "
             + "--no-seektable --force-raw-format -f -c -";
 #ifdef _WIN32
+        Log().Info("StartCapture(): FLAC pipe command: {0}", cmd);
         flacPipeHandle = openPipeNoWindow(cmd, flacPipeProcess, flacReadPipeHandle);
         // Store the raw HANDLE so ProcessingThread can use WriteFile directly,
         // bypassing the MinGW CRT which may call abort() on a broken pipe.
@@ -791,6 +792,8 @@ void UsbDeviceBase::AddCompletedTransferCount(size_t incrementCount)
 //----------------------------------------------------------------------------------------------------------------------
 void UsbDeviceBase::ProcessingThread()
 {
+  try
+  {
     ThreadPriorityRestoreInfo priorityRestoreInfo = {};
     bool boostedThreadPriority = SetCurrentThreadRealtimePriority(priorityRestoreInfo);
     std::shared_ptr<void> currentThreadPriorityReducer;
@@ -891,6 +894,13 @@ void UsbDeviceBase::ProcessingThread()
             {
                 // Write raw s16le data to the ffmpeg+flac pipe using WriteFile directly.
                 // Avoids fwrite/MinGW CRT which can call abort() on a broken pipe.
+                if (flacStdinWriteHandle == INVALID_HANDLE_VALUE)
+                {
+                    Log().Error("ProcessingThread(): flacStdinWriteHandle is invalid — pipe was not opened successfully");
+                    SetProcessingFinished(TransferResult::FileWriteError);
+                    processingFailure = true;
+                    continue;
+                }
                 DWORD written = 0;
                 BOOL ok = WriteFile(flacStdinWriteHandle, currentConversionBuffer.data(),
                                     static_cast<DWORD>(currentConversionBuffer.size()), &written, NULL);
@@ -1031,6 +1041,17 @@ void UsbDeviceBase::ProcessingThread()
     {
         SetProcessingFinished(TransferResult::Success);
     }
+  }
+  catch (const std::exception& e)
+  {
+      Log().Error("ProcessingThread(): Unhandled exception: {0}", e.what());
+      SetProcessingFinished(TransferResult::ProgramError);
+  }
+  catch (...)
+  {
+      Log().Error("ProcessingThread(): Unknown unhandled exception");
+      SetProcessingFinished(TransferResult::ProgramError);
+  }
 }
 
 //----------------------------------------------------------------------------------------------------------------------
