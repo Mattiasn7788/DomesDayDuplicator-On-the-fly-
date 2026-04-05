@@ -1,5 +1,4 @@
 #include "UsbDeviceBase.h"
-#include <csignal>
 #ifdef _WIN32
 #include <memoryapi.h>
 #include <io.h>
@@ -202,6 +201,10 @@ bool UsbDeviceBase::StartCapture(const std::filesystem::path& filePath, CaptureF
             + "--no-seektable --force-raw-format -f -c -";
 #ifdef _WIN32
         flacPipeHandle = openPipeNoWindow(cmd, flacPipeProcess, flacReadPipeHandle);
+        // Store the raw HANDLE so ProcessingThread can use WriteFile directly,
+        // bypassing the MinGW CRT which may call abort() on a broken pipe.
+        if (flacPipeHandle != nullptr)
+            flacStdinWriteHandle = reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(flacPipeHandle)));
 #else
         flacPipeHandle = popen(cmd.c_str(), "w");
 #endif
@@ -213,9 +216,6 @@ bool UsbDeviceBase::StartCapture(const std::filesystem::path& filePath, CaptureF
             return false;
         }
 
-        // MinGW-w64 CRT simulates SIGPIPE on Windows: a broken pipe from fwrite() would
-        // raise SIGPIPE and kill the process. Ignore it so fwrite() returns an error instead.
-        std::signal(SIGPIPE, SIG_IGN);
 
 #ifdef _WIN32
         // Start a background thread that reads flac's stdout and writes to the output file,
@@ -352,6 +352,7 @@ void UsbDeviceBase::StopCapture()
         {
 #ifdef _WIN32
             // Close stdin pipe → ffmpeg gets EOF → flac gets EOF → flac closes stdout pipe
+            flacStdinWriteHandle = INVALID_HANDLE_VALUE; // fclose below closes the underlying HANDLE
             fclose(flacPipeHandle);
             flacPipeHandle = nullptr;
             if (flacPipeProcess != INVALID_HANDLE_VALUE)
@@ -858,11 +859,14 @@ void UsbDeviceBase::ProcessingThread()
             // Write the converted data to the pipe or output file
             if (captureFormat == CaptureFormat::Signed16BitFlacOnTheFly)
             {
-                // Write raw s16le data to the ffmpeg+flac pipe
-                size_t written = fwrite(currentConversionBuffer.data(), 1, currentConversionBuffer.size(), flacPipeHandle);
-                if (written != currentConversionBuffer.size())
+                // Write raw s16le data to the ffmpeg+flac pipe using WriteFile directly.
+                // Avoids fwrite/MinGW CRT which can call abort() on a broken pipe.
+                DWORD written = 0;
+                BOOL ok = WriteFile(flacStdinWriteHandle, currentConversionBuffer.data(),
+                                    static_cast<DWORD>(currentConversionBuffer.size()), &written, NULL);
+                if (!ok || written != static_cast<DWORD>(currentConversionBuffer.size()))
                 {
-                    Log().Error("ProcessingThread(): Failed to write to FLAC pipe");
+                    Log().Error("ProcessingThread(): Failed to write to FLAC pipe (WriteFile error {0})", GetLastError());
                     SetProcessingFinished(TransferResult::FileWriteError);
                     processingFailure = true;
                     continue;

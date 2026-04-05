@@ -221,6 +221,7 @@ private:
 #ifdef _WIN32
     HANDLE flacPipeProcess = INVALID_HANDLE_VALUE;
     HANDLE flacReadPipeHandle = INVALID_HANDLE_VALUE;
+    HANDLE flacStdinWriteHandle = INVALID_HANDLE_VALUE; // raw HANDLE used for WriteFile (avoids MinGW CRT abort on broken pipe)
 #endif
     std::thread flacReaderThread;
 
