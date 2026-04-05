@@ -2,11 +2,11 @@ name: Compact Windows Build + Release
 
 on:
   push:
-    branches: [ master ]
+    branches: [ main, master ]
     tags:
       - 'v*'
   pull_request:
-    branches: [ master ]
+    branches: [ main, master ]
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -90,12 +90,19 @@ jobs:
           echo "=== FINAL CONTENTS ==="
           ls -la
 
-          # Create clean zip
+          # Create zip
           cd ..
           cd build
           zip -9 -r ../../DomesdayDuplicator_Flac+DownSampling.zip ./*
           cd ../..
           ls -lh DomesdayDuplicator_Flac+DownSampling.zip
+
+      - name: Upload artifact (all builds)
+        uses: actions/upload-artifact@v4
+        with:
+          name: DomesdayDuplicator-Windows
+          path: DomesdayDuplicator_Flac+DownSampling.zip
+          retention-days: 30
 
       - name: Create Release
         if: startsWith(github.ref, 'refs/tags/v')
