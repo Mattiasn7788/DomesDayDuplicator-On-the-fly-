@@ -93,6 +93,14 @@ jobs:
 
           rm -f zlib1.dll 2>/dev/null || true
 
+          # Remove Qt plugins we don't use.
+          # qtuiotouchplugin (touch input) drags in Qt6Network + libcrypto + TLS DLLs.
+          rm -rf generic networkinformation tls 2>/dev/null || true
+          rm -f Qt6Network.dll libcrypto-3-x64.dll libssl-3-x64.dll \
+                libgnutls-30.dll libhogweed-6.dll libnettle-8.dll \
+                libp11-kit-0.dll libtasn1-6.dll libidn2-0.dll \
+                libunistring-5.dll 2>/dev/null || true
+
           find . -maxdepth 1 -type f ! -name "*.exe" ! -name "*.dll" -delete
           find . -maxdepth 1 -type d ! -name "." ! -name "platforms" ! -name "styles" -exec rm -rf {} +
 
