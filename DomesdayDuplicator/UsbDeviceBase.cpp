@@ -41,7 +41,9 @@ static FILE* openPipeNoWindow(const std::string& cmd, HANDLE& outProcess, HANDLE
     si.hStdError  = GetStdHandle(STD_ERROR_HANDLE);
 
     PROCESS_INFORMATION pi = {};
-    std::string fullCmd = "cmd.exe /c " + cmd;
+    // cmd.exe /c strips the first and last " from the command, so wrap the
+    // entire command in outer quotes so the inner quoted paths survive intact.
+    std::string fullCmd = "cmd.exe /c \"" + cmd + "\"";
     BOOL ok = CreateProcessA(NULL, const_cast<char*>(fullCmd.c_str()),
                              NULL, NULL, TRUE, CREATE_NO_WINDOW,
                              NULL, NULL, &si, &pi);
