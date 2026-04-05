@@ -130,64 +130,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  build-macos:
-    runs-on: macos-latest  # ARM (Apple Silicon); runs on Intel Macs via Rosetta 2
-    permissions:
-      contents: write
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Install dependencies
-        run: |
-          brew install cmake qt6 libusb ffmpeg flac brotli webp
-
-      - name: Build & Package
-        run: |
-          mkdir -p build && cd build
-
-          # Tell pkg-config where Homebrew's ffmpeg and libusb libraries are
-          export PKG_CONFIG_PATH="$(brew --prefix ffmpeg)/lib/pkgconfig:$(brew --prefix libusb)/lib/pkgconfig:$PKG_CONFIG_PATH"
-
-          cmake .. -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_PREFIX_PATH="$(brew --prefix qt6)" \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
-
-          make -j$(sysctl -n hw.logicalcpu)
-
-          # Deploy Qt into the app bundle (no -dmg yet — we sign first)
-          $(brew --prefix qt6)/bin/macdeployqt6 DomesdayDuplicator/DomesdayDuplicator.app
-
-          # macdeployqt6 may leave some bundled dylibs without a valid signature.
-          # Force ad-hoc re-sign of every library and then the whole app bundle.
-          find DomesdayDuplicator/DomesdayDuplicator.app \
-               \( -name "*.dylib" -o -name "*.so" \) \
-               -exec codesign --force --sign - {} \; 2>/dev/null || true
-          codesign --force --deep --sign - DomesdayDuplicator/DomesdayDuplicator.app 2>/dev/null || true
-
-          # Build the DMG from the signed app bundle
-          hdiutil create -volname DomesdayDuplicator \
-            -srcfolder DomesdayDuplicator/DomesdayDuplicator.app \
-            -ov -format UDZO ../DomesdayDuplicator_macOS.dmg
-
-          echo "=== FINAL CONTENTS ==="
-          ls -lh ../DomesdayDuplicator_macOS.dmg
-
-      - name: Upload artifact (macOS)
-        uses: actions/upload-artifact@v4
-        with:
-          name: DomesdayDuplicator-macOS
-          path: DomesdayDuplicator_macOS.dmg
-          retention-days: 30
-
-      - name: Create Release (macOS)
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v1
-        with:
-          files: DomesdayDuplicator_macOS.dmg
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  # macOS build removed — GitHub no longer provides free Intel runners,
+  # and ARM builds do not run on Intel Macs. Re-add when an Apple Silicon
+  # runner becomes available or a self-hosted Mac runner is set up.
