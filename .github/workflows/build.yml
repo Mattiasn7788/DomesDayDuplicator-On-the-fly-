@@ -90,12 +90,9 @@ jobs:
           echo "=== FINAL CONTENTS ==="
           ls -la
 
-          # Create zip
-          cd ..
-          cd build
-          zip -9 -r ../../DomesdayDuplicator_Flac+DownSampling.zip ./*
-          cd ../..
-          ls -lh DomesdayDuplicator_Flac+DownSampling.zip
+          # Create zip in workspace root
+          zip -9 -r "$GITHUB_WORKSPACE/DomesdayDuplicator_Flac+DownSampling.zip" ./*
+          ls -lh "$GITHUB_WORKSPACE/DomesdayDuplicator_Flac+DownSampling.zip"
 
       - name: Upload artifact (all builds)
         uses: actions/upload-artifact@v4
