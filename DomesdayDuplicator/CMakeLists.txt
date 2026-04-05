@@ -47,8 +47,8 @@ target_link_libraries(DomesdayDuplicator PRIVATE
     Qt::Widgets
     Qt::SerialPort
     ${LibUSB_LIBRARIES}
-    ${SWRESAMPLE_LIBRARIES}
-    ${AVUTIL_LIBRARIES}
+    PkgConfig::SWRESAMPLE
+    PkgConfig::AVUTIL
 )
 
 target_include_directories(DomesdayDuplicator PRIVATE

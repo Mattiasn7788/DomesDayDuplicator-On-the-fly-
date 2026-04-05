@@ -26,8 +26,8 @@ if(NOT DEFINED ENV{PKG_CONFIG_PATH})
     endif()
 endif()
 
-pkg_check_modules(SWRESAMPLE REQUIRED libswresample)
-pkg_check_modules(AVUTIL REQUIRED libavutil)
+pkg_check_modules(SWRESAMPLE REQUIRED IMPORTED_TARGET libswresample)
+pkg_check_modules(AVUTIL REQUIRED IMPORTED_TARGET libavutil)
 
 add_subdirectory(DomesdayDuplicator)
 add_subdirectory(dddconv)
