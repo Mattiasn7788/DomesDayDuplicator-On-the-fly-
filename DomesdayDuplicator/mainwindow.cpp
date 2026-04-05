@@ -1341,8 +1341,16 @@ void MainWindow::StartCapture()
     // queue is selected, we assume no more than 12mb of memory can be queued, which is 3/4 of that limit.
     const size_t smallUsbTransferQueueSize = 12 * 1024 * 1024;
     size_t maxDiskBufferQueueSizeInBytes = configuration->getDiskBufferQueueSize();
+    // On macOS, the IOKit USB stack has tighter queue limits than Windows/Linux.
+    // Force the small USB transfer queue and small transfer size regardless of
+    // user settings to prevent capture underflow on macOS.
+#ifdef __APPLE__
+    size_t maxUsbTransferQueueSizeInBytes = smallUsbTransferQueueSize;
+    bool useSmallUsbTransfers = true;
+#else
     size_t maxUsbTransferQueueSizeInBytes = (configuration->getUseSmallUsbTransferQueue() ? smallUsbTransferQueueSize : maxDiskBufferQueueSizeInBytes);
     bool useSmallUsbTransfers = configuration->getUseSmallUsbTransfers();
+#endif
     bool useAsyncFileIo = configuration->getUseAsyncFileIo();
 
     // Attempt to start the capture process
