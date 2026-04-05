@@ -1418,43 +1418,44 @@ void MainWindow::StartCapture()
 void MainWindow::StartAudioCapture(const std::filesystem::path& rfFilePath)
 {
     // Build audio output path: same stem as RF file + "_audio.flac"
+    // Use wstring throughout so non-ASCII characters in paths (e.g. Swedish ä) work correctly.
     std::filesystem::path audioFilePath = rfFilePath.parent_path() / (rfFilePath.stem().string() + "_audio.flac");
 
     // Determine fmedia executable path
-    std::string fmediaExe;
+    std::wstring fmediaExeW;
     QString configuredPath = configuration->getFmediaPath().trimmed();
     if (!configuredPath.isEmpty()) {
-        fmediaExe = configuredPath.toStdString();
-    } else if (std::filesystem::exists("C:/Program Files/fmedia/fmedia.exe")) {
-        fmediaExe = "C:/Program Files/fmedia/fmedia.exe";
+        fmediaExeW = configuredPath.toStdWString();
+    } else if (std::filesystem::exists(L"C:/Program Files/fmedia/fmedia.exe")) {
+        fmediaExeW = L"C:/Program Files/fmedia/fmedia.exe";
     } else {
-        fmediaExe = "fmedia";
+        fmediaExeW = L"fmedia";
     }
 
     int deviceIndex = configuration->getAudioCaptureDeviceIndex();
-    std::string audioOutPath = audioFilePath.string();
+    std::wstring audioOutPathW = audioFilePath.wstring();
 
     // Build command line
-    std::string cmdLine = "\"" + fmediaExe + "\" --record"
-        " --out=\"" + audioOutPath + "\""
-        " --dev-capture=" + std::to_string(deviceIndex);
+    std::wstring cmdLine = L"\"" + fmediaExeW + L"\" --record"
+        L" --out=\"" + audioOutPathW + L"\""
+        L" --dev-capture=" + std::to_wstring(deviceIndex);
 
-    STARTUPINFOA si = {};
+    STARTUPINFOW si = {};
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESHOWWINDOW;
     si.wShowWindow = SW_HIDE;
 
     ZeroMemory(&fmediaProcessInfo, sizeof(fmediaProcessInfo));
 
-    std::vector<char> cmdBuf(cmdLine.begin(), cmdLine.end());
-    cmdBuf.push_back('\0');
+    std::vector<wchar_t> cmdBuf(cmdLine.begin(), cmdLine.end());
+    cmdBuf.push_back(L'\0');
 
-    if (CreateProcessA(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE,
+    if (CreateProcessW(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE,
                        CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
                        nullptr, nullptr, &si, &fmediaProcessInfo)) {
         fmediaRunning = true;
         qDebug() << "MainWindow::StartAudioCapture(): Started fmedia, pid=" << fmediaProcessInfo.dwProcessId
-                 << "out=" << QString::fromStdString(audioOutPath);
+                 << "out=" << QString::fromStdWString(audioOutPathW);
     } else {
         fmediaRunning = false;
         qDebug() << "MainWindow::StartAudioCapture(): Failed to start fmedia, error=" << GetLastError();
@@ -1482,40 +1483,41 @@ void MainWindow::StopAudioCapture()
 void MainWindow::StartSdrCapture(const std::filesystem::path& rfFilePath)
 {
     // Build output base path: same stem + "_hifi"
+    // Use wstring throughout so non-ASCII characters in paths (e.g. Swedish ä) work correctly.
     std::filesystem::path outputBase = rfFilePath.parent_path() / (rfFilePath.stem().string() + "_hifi");
 
     // Determine radioconda root (python path is e.g. C:\ProgramData\radioconda\python.exe)
     QString configuredPython = configuration->getSdrPythonPath().trimmed();
-    std::string pythonExe = configuredPython.isEmpty()
-        ? "C:\\ProgramData\\radioconda\\python.exe"
-        : configuredPython.toStdString();
+    std::wstring pythonExeW = configuredPython.isEmpty()
+        ? L"C:\\ProgramData\\radioconda\\python.exe"
+        : configuredPython.toStdWString();
 
     // Derive radioconda root from python.exe path so activate.bat can be found
-    std::filesystem::path condaRoot = std::filesystem::path(pythonExe).parent_path();
-    std::string activateBat = (condaRoot / "Scripts" / "activate.bat").string();
+    std::filesystem::path condaRoot = std::filesystem::path(pythonExeW).parent_path();
+    std::wstring activateBatW = (condaRoot / "Scripts" / "activate.bat").wstring();
 
-    std::string scriptPath = configuration->getSdrScriptPath().toStdString();
-    std::string system     = configuration->getSdrSystem().toStdString();
-    int gain               = configuration->getSdrGain();
+    std::wstring scriptPathW = configuration->getSdrScriptPath().toStdWString();
+    std::wstring systemW     = configuration->getSdrSystem().toStdWString();
+    int gain                 = configuration->getSdrGain();
 
     // Run via cmd /C so activate.bat sets up DLL search paths for SoapySDR
-    std::string cmdLine = "cmd /C \"\"" + activateBat + "\" && \""
-        + pythonExe + "\" \"" + scriptPath + "\""
-        " --output \"" + outputBase.string() + "\""
-        " --system " + system +
-        " --gain " + std::to_string(gain) + "\"";
+    std::wstring cmdLine = L"cmd /C \"\"" + activateBatW + L"\" && \""
+        + pythonExeW + L"\" \"" + scriptPathW + L"\""
+        L" --output \"" + outputBase.wstring() + L"\""
+        L" --system " + systemW +
+        L" --gain " + std::to_wstring(gain) + L"\"";
 
-    STARTUPINFOA si = {};
+    STARTUPINFOW si = {};
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESHOWWINDOW;
     si.wShowWindow = SW_HIDE;
 
     ZeroMemory(&sdrProcessInfo, sizeof(sdrProcessInfo));
 
-    std::vector<char> cmdBuf(cmdLine.begin(), cmdLine.end());
-    cmdBuf.push_back('\0');
+    std::vector<wchar_t> cmdBuf(cmdLine.begin(), cmdLine.end());
+    cmdBuf.push_back(L'\0');
 
-    if (CreateProcessA(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE,
+    if (CreateProcessW(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE,
                        CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
                        nullptr, nullptr, &si, &sdrProcessInfo)) {
         // Assign to a Job Object so the entire process tree (cmd + python) is killed together
