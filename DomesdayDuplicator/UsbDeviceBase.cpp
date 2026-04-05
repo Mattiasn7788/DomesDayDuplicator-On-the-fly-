@@ -7,7 +7,9 @@
 // Opens a cmd.exe pipe without showing a console window.
 // Returns the write-end FILE* (for ffmpeg stdin) and stores the process handle and
 // a read HANDLE for the process stdout (flac output).
-static FILE* openPipeNoWindow(const std::string& cmd, HANDLE& outProcess, HANDLE& outReadPipe)
+// Uses wide-character CreateProcessW so paths with non-ASCII characters (accented
+// folder names, etc.) are handled correctly.
+static FILE* openPipeNoWindow(const std::wstring& cmd, HANDLE& outProcess, HANDLE& outReadPipe)
 {
     outProcess = INVALID_HANDLE_VALUE;
     outReadPipe = INVALID_HANDLE_VALUE;
@@ -32,7 +34,7 @@ static FILE* openPipeNoWindow(const std::string& cmd, HANDLE& outProcess, HANDLE
     }
     SetHandleInformation(hStdoutRead, HANDLE_FLAG_INHERIT, 0); // read end is ours, non-inheritable
 
-    STARTUPINFOA si = {};
+    STARTUPINFOW si = {};
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
     si.wShowWindow = SW_HIDE;
@@ -43,8 +45,8 @@ static FILE* openPipeNoWindow(const std::string& cmd, HANDLE& outProcess, HANDLE
     PROCESS_INFORMATION pi = {};
     // cmd.exe /c strips the first and last " from the command, so wrap the
     // entire command in outer quotes so the inner quoted paths survive intact.
-    std::string fullCmd = "cmd.exe /c \"" + cmd + "\"";
-    BOOL ok = CreateProcessA(NULL, const_cast<char*>(fullCmd.c_str()),
+    std::wstring fullCmd = L"cmd.exe /c \"" + cmd + L"\"";
+    BOOL ok = CreateProcessW(NULL, const_cast<wchar_t*>(fullCmd.c_str()),
                              NULL, NULL, TRUE, CREATE_NO_WINDOW,
                              NULL, NULL, &si, &pi);
 
@@ -177,39 +179,50 @@ bool UsbDeviceBase::StartCapture(const std::filesystem::path& filePath, CaptureF
             return false;
         }
 
-        // Look for ffmpeg/flac next to our own exe first, then fall back to PATH
-        std::string ffmpegCmd = "ffmpeg";
-        std::string flacCmd   = "flac";
+        // Look for ffmpeg/flac next to our own exe first, then fall back to PATH.
+        // Use wide strings (GetModuleFileNameW + CreateProcessW) so non-ASCII characters
+        // in the install path (e.g. accented folder names) are handled correctly.
 #ifdef _WIN32
         {
-            char exePath[MAX_PATH] = {};
-            GetModuleFileNameA(NULL, exePath, MAX_PATH);
-            std::string exeDir = std::string(exePath);
-            auto lastSlash = exeDir.find_last_of("\\/");
-            exeDir = (lastSlash != std::string::npos) ? exeDir.substr(0, lastSlash + 1) : "";
-            std::string ffmpegLocal = exeDir + "ffmpeg.exe";
-            std::string flacLocal   = exeDir + "flac.exe";
-            if (std::filesystem::exists(ffmpegLocal)) ffmpegCmd = "\"" + ffmpegLocal + "\"";
-            if (std::filesystem::exists(flacLocal))   flacCmd   = "\"" + flacLocal   + "\"";
-        }
-#endif
+            std::wstring ffmpegCmdW = L"ffmpeg";
+            std::wstring flacCmdW   = L"flac";
+            wchar_t wExePath[MAX_PATH] = {};
+            GetModuleFileNameW(NULL, wExePath, MAX_PATH);
+            std::wstring exeDirW(wExePath);
+            auto lastSlash = exeDirW.find_last_of(L"\\/");
+            exeDirW = (lastSlash != std::wstring::npos) ? exeDirW.substr(0, lastSlash + 1) : L"";
+            std::wstring ffmpegLocalW = exeDirW + L"ffmpeg.exe";
+            std::wstring flacLocalW   = exeDirW + L"flac.exe";
+            if (std::filesystem::exists(ffmpegLocalW)) ffmpegCmdW = L"\"" + ffmpegLocalW + L"\"";
+            if (std::filesystem::exists(flacLocalW))   flacCmdW   = L"\"" + flacLocalW   + L"\"";
 
-        // flac writes to stdout (-c), which we capture via the stdout pipe
-        std::string cmd = ffmpegCmd + " -hide_banner -loglevel error -f s16le -ar 40000000 -ac 1 -i pipe:0 "
-            + "-af aresample=" + std::to_string(outputSampleRate) + ":resampler=soxr:precision=28 "
-            + "-sample_fmt u8 -f u8 - | "
-            + flacCmd + " -" + std::to_string(level) + " --bps=8 --sign=unsigned --channels=1 --endian=little "
-            + "--sample-rate=" + std::to_string(flacSampleRate) + " "
-            + "--no-seektable --force-raw-format -f -c -";
-#ifdef _WIN32
-        Log().Info("StartCapture(): FLAC pipe command: {0}", cmd);
-        flacPipeHandle = openPipeNoWindow(cmd, flacPipeProcess, flacReadPipeHandle);
-        // Store the raw HANDLE so ProcessingThread can use WriteFile directly,
-        // bypassing the MinGW CRT which may call abort() on a broken pipe.
-        if (flacPipeHandle != nullptr)
-            flacStdinWriteHandle = reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(flacPipeHandle)));
+            // flac writes to stdout (-c), which we capture via the stdout pipe
+            std::wstring cmd = ffmpegCmdW + L" -hide_banner -loglevel error -f s16le -ar 40000000 -ac 1 -i pipe:0 "
+                + L"-af aresample=" + std::to_wstring(outputSampleRate) + L":resampler=soxr:precision=28 "
+                + L"-sample_fmt u8 -f u8 - | "
+                + flacCmdW + L" -" + std::to_wstring(level) + L" --bps=8 --sign=unsigned --channels=1 --endian=little "
+                + L"--sample-rate=" + std::to_wstring(flacSampleRate) + L" "
+                + L"--no-seektable --force-raw-format -f -c -";
+            Log().Info(std::wstring(L"StartCapture(): FLAC pipe command: ") + cmd);
+            flacPipeHandle = openPipeNoWindow(cmd, flacPipeProcess, flacReadPipeHandle);
+            // Store the raw HANDLE so ProcessingThread can use WriteFile directly,
+            // bypassing the MinGW CRT which may call abort() on a broken pipe.
+            if (flacPipeHandle != nullptr)
+                flacStdinWriteHandle = reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(flacPipeHandle)));
+        }
 #else
-        flacPipeHandle = popen(cmd.c_str(), "w");
+        {
+            std::string ffmpegCmd = "ffmpeg";
+            std::string flacCmd   = "flac";
+            // flac writes to stdout (-c), which we capture via the stdout pipe
+            std::string cmd = ffmpegCmd + " -hide_banner -loglevel error -f s16le -ar 40000000 -ac 1 -i pipe:0 "
+                + "-af aresample=" + std::to_string(outputSampleRate) + ":resampler=soxr:precision=28 "
+                + "-sample_fmt u8 -f u8 - | "
+                + flacCmd + " -" + std::to_string(level) + " --bps=8 --sign=unsigned --channels=1 --endian=little "
+                + "--sample-rate=" + std::to_string(flacSampleRate) + " "
+                + "--no-seektable --force-raw-format -f -c -";
+            flacPipeHandle = popen(cmd.c_str(), "w");
+        }
 #endif
         if (flacPipeHandle == nullptr)
         {
