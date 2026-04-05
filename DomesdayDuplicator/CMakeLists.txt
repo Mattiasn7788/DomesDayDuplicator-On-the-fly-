@@ -15,8 +15,11 @@ set(DomesdayDuplicator_SOURCES
     QtLogger.cpp
     UsbDeviceBase.cpp
     UsbDeviceLibUsb.cpp
-    UsbDeviceWinUsb.cpp
 )
+
+if(WIN32)
+    list(APPEND DomesdayDuplicator_SOURCES UsbDeviceWinUsb.cpp)
+endif()
 
 qt_add_resources(DomesdayDuplicator_SOURCES resources.qrc)
 
