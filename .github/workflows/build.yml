@@ -169,8 +169,25 @@ jobs:
 
           make -j$(sysctl -n hw.logicalcpu)
 
-          # Deploy Qt into the app bundle (no -dmg yet — we sign first)
-          $(brew --prefix qt6)/bin/macdeployqt6 DomesdayDuplicator/DomesdayDuplicator.app
+          # Deploy Qt into the app bundle (no -dmg yet — we sign first).
+          # macdeployqt6 prints rpath errors for optional Qt modules (QtPdf, QtSvg,
+          # QtVirtualKeyboard) that aren't installed — these are harmless, so use || true.
+          $(brew --prefix qt6)/bin/macdeployqt6 DomesdayDuplicator/DomesdayDuplicator.app || true
+
+          # Copy indirect dylib dependencies that macdeployqt6 fails to resolve
+          # (libwebp/libsharpyuv pulled in by Qt image plugins, libbrotlicommon by freetype).
+          APP_FW="DomesdayDuplicator/DomesdayDuplicator.app/Contents/Frameworks"
+          for lib in \
+              "$(brew --prefix webp)/lib/libwebp.7.dylib" \
+              "$(brew --prefix webp)/lib/libsharpyuv.0.dylib" \
+              "$(brew --prefix brotli)/lib/libbrotlicommon.1.dylib"; do
+            [ -f "$lib" ] && cp -n "$lib" "$APP_FW/" 2>/dev/null || true
+          done
+          # Fix install names so the copied libs are self-contained inside the bundle
+          for lib in libwebp.7.dylib libsharpyuv.0.dylib libbrotlicommon.1.dylib; do
+            [ -f "$APP_FW/$lib" ] && \
+              install_name_tool -id "@rpath/$lib" "$APP_FW/$lib" 2>/dev/null || true
+          done
 
           # macdeployqt6 may leave some bundled dylibs without a valid signature.
           # Force ad-hoc re-sign of every library and then the whole app bundle.
