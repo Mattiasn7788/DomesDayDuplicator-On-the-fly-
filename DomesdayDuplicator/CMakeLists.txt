@@ -30,10 +30,11 @@ target_compile_definitions(DomesdayDuplicator PRIVATE
     QT_DEPRECATED_WARNINGS
 )
 
-# Maximise optimisation for Release builds with MinGW/GCC to close the
-# performance gap vs MSVC-compiled binaries.
+# Maximise optimisation for Release builds (GCC/MinGW and Clang/AppleClang).
+# This is especially important on macOS where the data-conversion loop runs at 80 MB/s;
+# without -O3 the ProcessingThread can't keep pace with the USB transfer rate.
 target_compile_options(DomesdayDuplicator PRIVATE
-    $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:GNU>>:-O3 -funroll-loops>
+    $<$<AND:$<CONFIG:Release>,$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>>>:-O3 -funroll-loops>
 )
 
 # Suppress deprecation warnings from the third-party qcustomplot.cpp on all platforms

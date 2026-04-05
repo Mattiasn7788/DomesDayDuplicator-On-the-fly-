@@ -172,7 +172,12 @@ bool UsbDeviceBase::StartCapture(const std::filesystem::path& filePath, CaptureF
         int flacSampleRate   = flacOutputSampleRateInHz / 1000;
         int level = (flacCompressionLevel >= 0 && flacCompressionLevel <= 8) ? flacCompressionLevel : 8;
 
-        // Open the output file ourselves so we can track FLAC bytes written
+        // Look for ffmpeg/flac next to our own exe first, then fall back to PATH.
+        // Use wide strings (GetModuleFileNameW + CreateProcessW) so non-ASCII characters
+        // in the install path (e.g. accented folder names) are handled correctly.
+#ifdef _WIN32
+        // On Windows, open the output file ourselves; a background reader thread captures
+        // flac's stdout pipe and writes compressed FLAC bytes here.
         captureOutputFile.clear();
         captureOutputFile.open(filePath, std::ios::out | std::ios::trunc | std::ios::binary);
         if (!captureOutputFile.is_open())
@@ -181,11 +186,7 @@ bool UsbDeviceBase::StartCapture(const std::filesystem::path& filePath, CaptureF
             captureResult = TransferResult::FileCreationError;
             return false;
         }
-
-        // Look for ffmpeg/flac next to our own exe first, then fall back to PATH.
-        // Use wide strings (GetModuleFileNameW + CreateProcessW) so non-ASCII characters
-        // in the install path (e.g. accented folder names) are handled correctly.
-#ifdef _WIN32
+#endif // _WIN32
         {
             std::wstring ffmpegCmdW = L"ffmpeg";
             std::wstring flacCmdW   = L"flac";
@@ -233,20 +234,35 @@ bool UsbDeviceBase::StartCapture(const std::filesystem::path& filePath, CaptureF
                 }
             }
 #endif
-            // flac writes to stdout (-c), which we capture via the stdout pipe
+            // On non-Windows, popen("w") only gives us a pipe to the command's stdin;
+            // the command's stdout goes to the process stdout, which is silently discarded
+            // in an .app bundle. Instead of "-c -" (stdout), pass "-o path" so flac writes
+            // directly to the output file without needing a reader thread.
+            // Shell-quote the path: wrap in single quotes, escaping embedded single quotes
+            // as '\'' (close-quote, escaped-quote, re-open-quote) — handles all filenames.
+            std::string quotedOutputPath = "'";
+            for (char c : filePath.string()) {
+                if (c == '\'') quotedOutputPath += "'\\''";
+                else           quotedOutputPath += c;
+            }
+            quotedOutputPath += "'";
+
             std::string cmd = ffmpegCmd + " -hide_banner -loglevel error -f s16le -ar 40000000 -ac 1 -i pipe:0 "
                 + "-af aresample=" + std::to_string(outputSampleRate) + ":resampler=soxr:precision=28 "
                 + "-sample_fmt u8 -f u8 - | "
                 + flacCmd + " -" + std::to_string(level) + " --bps=8 --sign=unsigned --channels=1 --endian=little "
                 + "--sample-rate=" + std::to_string(flacSampleRate) + " "
-                + "--no-seektable --force-raw-format -f -c -";
+                + "--no-seektable --force-raw-format -f - -o " + quotedOutputPath;
+            Log().Info(std::string("StartCapture(): FLAC pipe command: ") + cmd);
             flacPipeHandle = popen(cmd.c_str(), "w");
         }
 #endif
         if (flacPipeHandle == nullptr)
         {
             Log().Error("StartCapture(): Failed to open FLAC pipe");
+#ifdef _WIN32
             captureOutputFile.close();
+#endif
             captureResult = TransferResult::FileCreationError;
             return false;
         }
