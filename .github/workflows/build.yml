@@ -142,13 +142,13 @@ jobs:
 
       - name: Install dependencies
         run: |
-          brew install cmake qt6 libusb ffmpeg flac
+          brew install cmake qt6 libusb ffmpeg flac brotli webp
 
       - name: Build & Package
         run: |
           mkdir -p build && cd build
 
-          # Tell pkg-config where Homebrew's ffmpeg libraries are
+          # Tell pkg-config where Homebrew's ffmpeg and libusb libraries are
           export PKG_CONFIG_PATH="$(brew --prefix ffmpeg)/lib/pkgconfig:$(brew --prefix libusb)/lib/pkgconfig:$PKG_CONFIG_PATH"
 
           cmake .. -DCMAKE_BUILD_TYPE=Release \
@@ -156,8 +156,10 @@ jobs:
 
           make -j$(sysctl -n hw.logicalcpu)
 
-          # Bundle the app
+          # Bundle the app; use ad-hoc codesign (-) so the app passes
+          # Gatekeeper after the user right-clicks → Open on first launch.
           $(brew --prefix qt6)/bin/macdeployqt6 DomesdayDuplicator/DomesdayDuplicator.app \
+            -codesign=- \
             -dmg
 
           mv DomesdayDuplicator/DomesdayDuplicator.dmg ../DomesdayDuplicator_macOS.dmg
