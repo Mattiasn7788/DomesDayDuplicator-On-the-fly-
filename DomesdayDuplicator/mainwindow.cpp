@@ -26,6 +26,8 @@
 ************************************************************************/
 
 #include "mainwindow.h"
+#include <filesystem>
+#include <system_error>
 #include "ui_mainwindow.h"
 #include "UsbDeviceLibUsb.h"
 #ifdef _WIN32
@@ -477,6 +479,7 @@ void MainWindow::playerDisconnectedSignalHandler()
 void MainWindow::updateCaptureStatus()
 {
     // Update our transfer statistics. We update these even if a transfer is stopping or stopped.
+    // For FlacOnTheFly, GetFileSizeWrittenInBytes() returns actual FLAC bytes (tracked by the reader thread).
     size_t mbWritten = usbDevice->GetFileSizeWrittenInBytes() / (1024 * 1024);
     ui->dataCapturedLabel->setText(QString::number(mbWritten) + (tr(" MiB")));
     ui->numberOfTransfersLabel->setText(QString::number(usbDevice->GetNumberOfTransfers()));
@@ -676,8 +679,7 @@ void MainWindow::updateCaptureStatus()
 
         // Perform post-capture compression if needed (LDF/FLAC only)
         // Note: Downsampling formats are now processed in real-time during capture
-        if (configuration->getCaptureFormat() == Configuration::CaptureFormat::ldfCompressed ||
-            configuration->getCaptureFormat() == Configuration::CaptureFormat::flacDirect)
+        if (configuration->getCaptureFormat() == Configuration::CaptureFormat::ldfCompressed)
         {
             // For compressed formats, we need to process the raw 16-bit data
             // The capture was done to a temporary .s16 file, now we need to process it
@@ -1038,10 +1040,9 @@ void MainWindow::updateStorageInformation()
             bytesPerSecond = (samplesPerSecond * 2) / 2;
             break;
         case Configuration::CaptureFormat::flacDirect:
-            // Direct FLAC with moderate compression level
-            // Estimate ~60% of 16-bit size for storage calculation
-            // Note: For now, FLAC formats capture at full rate and apply downsampling in software
-            bytesPerSecond = (samplesPerSecond * 2) * 6 / 10;
+            // On-the-fly FLAC at the chosen sample rate, 8-bit.
+            // RF data typically achieves ~5% of uncompressed size with FLAC.
+            bytesPerSecond = static_cast<size_t>(configuration->getSampleRate()) * 1000 / 20;
             break;
         }
 
@@ -1163,6 +1164,8 @@ void MainWindow::StopCapture()
     // Flag the capture process to stop
     isCaptureStopping = true;
     playerControl->stopAutomaticCapture(); // Stop auto-capture if in progress
+    StopAudioCapture();
+    StopSdrCapture();
     std::thread stopThread([&]()
         {
             usbDevice->StopCapture();
@@ -1317,18 +1320,11 @@ void MainWindow::StartCapture()
     }
     else if (configuration->getCaptureFormat() == Configuration::CaptureFormat::flacDirect)
     {
-        // For FLAC Direct, check the sample rate configuration
-        int sampleRate = configuration->getSampleRate();
-        if (sampleRate == 1) {
-            qDebug() << "MainWindow::StartCapture(): Starting transfer - 16-bit 1/2 rate (20 MSPS) FLAC Direct with real-time downsampling";
-            captureFormat = UsbDeviceBase::CaptureFormat::Signed16BitHalf;
-        } else if (sampleRate == 2) {
-            qDebug() << "MainWindow::StartCapture(): Starting transfer - 16-bit 1/4 rate (10 MSPS) FLAC Direct with real-time downsampling";
-            captureFormat = UsbDeviceBase::CaptureFormat::Signed16BitQuarter;
-        } else {
-            qDebug() << "MainWindow::StartCapture(): Starting transfer - 16-bit (40 MSPS) FLAC Direct";
-            captureFormat = UsbDeviceBase::CaptureFormat::Signed16Bit;
-        }
+        // For FLAC Direct, pipe raw s16le through ffmpeg+flac on-the-fly (no temp file)
+        // getSampleRate() returns the target output rate in kHz (e.g. 20000 = 20 MSPS)
+        captureFormat = UsbDeviceBase::CaptureFormat::Signed16BitFlacOnTheFly;
+        qDebug() << "MainWindow::StartCapture(): Starting transfer - FLAC Direct on-the-fly"
+                 << configuration->getSampleRate() / 1000 << "MSPS";
     }
     else
     {
@@ -1351,7 +1347,11 @@ void MainWindow::StartCapture()
 
     // Attempt to start the capture process
     qDebug() << "MainWindow::StartCapture(): Starting capture to file:" << captureFilePath;
-    if (!usbDevice->StartCapture(captureFilePath, captureFormat, configuration->getUsbPreferredDevice().toStdString(), isTestMode, useSmallUsbTransfers, useAsyncFileIo, maxUsbTransferQueueSizeInBytes, maxDiskBufferQueueSizeInBytes))
+    int flacLevel = (captureFormat == UsbDeviceBase::CaptureFormat::Signed16BitFlacOnTheFly)
+                    ? configuration->getFlacCompressionLevel() : 8;
+    int flacOutputSampleRateInHz = (captureFormat == UsbDeviceBase::CaptureFormat::Signed16BitFlacOnTheFly)
+                    ? configuration->getSampleRate() * 1000 : 20000000;
+    if (!usbDevice->StartCapture(captureFilePath, captureFormat, configuration->getUsbPreferredDevice().toStdString(), isTestMode, useSmallUsbTransfers, useAsyncFileIo, maxUsbTransferQueueSizeInBytes, maxDiskBufferQueueSizeInBytes, flacLevel, flacOutputSampleRateInHz))
     {
         // Show an error based on the transfer result
         qDebug() << "MainWindow::StartCapture(): Failed to begin the capture process";
@@ -1398,7 +1398,169 @@ void MainWindow::StartCapture()
 
     // Start graph processing
     amplitudeTimer->start(1000);
+
+    // Start audio capture if enabled
+    if (configuration->getAudioCaptureEnabled()) {
+        StartAudioCapture(captureFilePath);
+    }
+
+    // Start SDR HiFi capture if enabled - delayed so USB capture is fully stable
+    // before GNURadio's heavy startup competes for CPU/disk
+    if (configuration->getSdrEnabled()) {
+        int delayMs = configuration->getSdrStartDelayMs();
+        QTimer::singleShot(delayMs, this, [this]() {
+            if (isCaptureRunning) StartSdrCapture(captureFilePath);
+        });
+    }
 }
+
+#ifdef _WIN32
+void MainWindow::StartAudioCapture(const std::filesystem::path& rfFilePath)
+{
+    // Build audio output path: same stem as RF file + "_audio.flac"
+    std::filesystem::path audioFilePath = rfFilePath.parent_path() / (rfFilePath.stem().string() + "_audio.flac");
+
+    // Determine fmedia executable path
+    std::string fmediaExe;
+    QString configuredPath = configuration->getFmediaPath().trimmed();
+    if (!configuredPath.isEmpty()) {
+        fmediaExe = configuredPath.toStdString();
+    } else if (std::filesystem::exists("C:/Program Files/fmedia/fmedia.exe")) {
+        fmediaExe = "C:/Program Files/fmedia/fmedia.exe";
+    } else {
+        fmediaExe = "fmedia";
+    }
+
+    int deviceIndex = configuration->getAudioCaptureDeviceIndex();
+    std::string audioOutPath = audioFilePath.string();
+
+    // Build command line
+    std::string cmdLine = "\"" + fmediaExe + "\" --record"
+        " --out=\"" + audioOutPath + "\""
+        " --dev-capture=" + std::to_string(deviceIndex);
+
+    STARTUPINFOA si = {};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+
+    ZeroMemory(&fmediaProcessInfo, sizeof(fmediaProcessInfo));
+
+    std::vector<char> cmdBuf(cmdLine.begin(), cmdLine.end());
+    cmdBuf.push_back('\0');
+
+    if (CreateProcessA(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE,
+                       CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
+                       nullptr, nullptr, &si, &fmediaProcessInfo)) {
+        fmediaRunning = true;
+        qDebug() << "MainWindow::StartAudioCapture(): Started fmedia, pid=" << fmediaProcessInfo.dwProcessId
+                 << "out=" << QString::fromStdString(audioOutPath);
+    } else {
+        fmediaRunning = false;
+        qDebug() << "MainWindow::StartAudioCapture(): Failed to start fmedia, error=" << GetLastError();
+    }
+}
+
+void MainWindow::StopAudioCapture()
+{
+    if (!fmediaRunning) return;
+
+    // Send Ctrl+Break so fmedia can flush and close the FLAC file cleanly
+    GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, fmediaProcessInfo.dwProcessId);
+
+    // Give it up to 5 seconds to exit gracefully, then terminate
+    if (WaitForSingleObject(fmediaProcessInfo.hProcess, 5000) != WAIT_OBJECT_0) {
+        TerminateProcess(fmediaProcessInfo.hProcess, 0);
+    }
+
+    CloseHandle(fmediaProcessInfo.hProcess);
+    CloseHandle(fmediaProcessInfo.hThread);
+    ZeroMemory(&fmediaProcessInfo, sizeof(fmediaProcessInfo));
+    fmediaRunning = false;
+    qDebug() << "MainWindow::StopAudioCapture(): fmedia stopped";
+}
+void MainWindow::StartSdrCapture(const std::filesystem::path& rfFilePath)
+{
+    // Build output base path: same stem + "_hifi"
+    std::filesystem::path outputBase = rfFilePath.parent_path() / (rfFilePath.stem().string() + "_hifi");
+
+    // Determine radioconda root (python path is e.g. C:\ProgramData\radioconda\python.exe)
+    QString configuredPython = configuration->getSdrPythonPath().trimmed();
+    std::string pythonExe = configuredPython.isEmpty()
+        ? "C:\\ProgramData\\radioconda\\python.exe"
+        : configuredPython.toStdString();
+
+    // Derive radioconda root from python.exe path so activate.bat can be found
+    std::filesystem::path condaRoot = std::filesystem::path(pythonExe).parent_path();
+    std::string activateBat = (condaRoot / "Scripts" / "activate.bat").string();
+
+    std::string scriptPath = configuration->getSdrScriptPath().toStdString();
+    std::string system     = configuration->getSdrSystem().toStdString();
+    int gain               = configuration->getSdrGain();
+
+    // Run via cmd /C so activate.bat sets up DLL search paths for SoapySDR
+    std::string cmdLine = "cmd /C \"\"" + activateBat + "\" && \""
+        + pythonExe + "\" \"" + scriptPath + "\""
+        " --output \"" + outputBase.string() + "\""
+        " --system " + system +
+        " --gain " + std::to_string(gain) + "\"";
+
+    STARTUPINFOA si = {};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+
+    ZeroMemory(&sdrProcessInfo, sizeof(sdrProcessInfo));
+
+    std::vector<char> cmdBuf(cmdLine.begin(), cmdLine.end());
+    cmdBuf.push_back('\0');
+
+    if (CreateProcessA(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE,
+                       CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
+                       nullptr, nullptr, &si, &sdrProcessInfo)) {
+        // Assign to a Job Object so the entire process tree (cmd + python) is killed together
+        sdrJobHandle = CreateJobObject(nullptr, nullptr);
+        if (sdrJobHandle) {
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli = {};
+            jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            SetInformationJobObject(sdrJobHandle, JobObjectExtendedLimitInformation, &jeli, sizeof(jeli));
+            AssignProcessToJobObject(sdrJobHandle, sdrProcessInfo.hProcess);
+        }
+        sdrRunning = true;
+        qDebug() << "MainWindow::StartSdrCapture(): Started GNURadio, pid=" << sdrProcessInfo.dwProcessId;
+    } else {
+        sdrRunning = false;
+        qDebug() << "MainWindow::StartSdrCapture(): Failed to start GNURadio, error=" << GetLastError();
+    }
+}
+
+void MainWindow::StopSdrCapture()
+{
+    if (!sdrRunning) return;
+
+    // TerminateJobObject kills cmd.exe AND the python child process
+    if (sdrJobHandle) {
+        TerminateJobObject(sdrJobHandle, 0);
+        CloseHandle(sdrJobHandle);
+        sdrJobHandle = nullptr;
+    } else {
+        TerminateProcess(sdrProcessInfo.hProcess, 0);
+    }
+
+    WaitForSingleObject(sdrProcessInfo.hProcess, 3000);
+    CloseHandle(sdrProcessInfo.hProcess);
+    CloseHandle(sdrProcessInfo.hThread);
+    ZeroMemory(&sdrProcessInfo, sizeof(sdrProcessInfo));
+    sdrRunning = false;
+    qDebug() << "MainWindow::StopSdrCapture(): GNURadio stopped";
+}
+
+#else
+void MainWindow::StartAudioCapture(const std::filesystem::path&) {}
+void MainWindow::StopAudioCapture() {}
+void MainWindow::StartSdrCapture(const std::filesystem::path&) {}
+void MainWindow::StopSdrCapture() {}
+#endif
 
 // Main window - capture button clicked
 void MainWindow::on_capturePushButton_clicked()

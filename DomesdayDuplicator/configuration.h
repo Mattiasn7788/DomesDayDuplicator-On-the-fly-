@@ -107,6 +107,24 @@ public:
     bool getAmplitudeChartEnabled() const;
     void setThemeStyle(int style);
     int getThemeStyle() const;
+    void setAudioCaptureEnabled(bool enabled);
+    bool getAudioCaptureEnabled() const;
+    void setAudioCaptureDeviceIndex(int index);
+    int getAudioCaptureDeviceIndex() const;
+    void setFmediaPath(QString path);
+    QString getFmediaPath() const;
+    void setSdrEnabled(bool enabled);
+    bool getSdrEnabled() const;
+    void setSdrPythonPath(QString path);
+    QString getSdrPythonPath() const;
+    void setSdrScriptPath(QString path);
+    QString getSdrScriptPath() const;
+    void setSdrSystem(QString system);
+    QString getSdrSystem() const;
+    void setSdrGain(int gain);
+    int getSdrGain() const;
+    void setSdrStartDelayMs(int ms);
+    int getSdrStartDelayMs() const;
 
     void setMainWindowGeometry(QByteArray mainWindowGeometry);
     QByteArray getMainWindowGeometry() const;
@@ -133,7 +151,7 @@ private:
         CaptureFormat captureFormat;
         int flacCompressionLevel;
         int flacOutputFormat;  // 0 = .flac, 1 = .ldf
-        int sampleRate;  // 0 = 40 MSPS, 1 = 20 MSPS, 2 = 10 MSPS
+        int sampleRate;  // Output sample rate in kHz (e.g. 20000 = 20 MSPS). Default 20000.
     };
 
     struct Usb {
@@ -161,6 +179,21 @@ private:
         int themeStyle;  // 0 = Auto, 1 = Light, 2 = Dark
     };
 
+    struct Audio {
+        bool audioCaptureEnabled;
+        int audioCaptureDeviceIndex;  // 1-based fmedia capture device number
+        QString fmediaPath;           // path to fmedia.exe, empty = auto-detect
+    };
+
+    struct Sdr {
+        bool sdrEnabled;
+        QString sdrPythonPath;   // path to python.exe, empty = use default radioconda path
+        QString sdrScriptPath;   // path to rtlsdr_to_flac.py
+        QString sdrSystem;       // "PAL" or "NTSC"
+        int sdrGain;             // 0 = auto
+        int sdrStartDelayMs;     // delay in ms before starting SDR after RF capture begins
+    };
+
     // Window geometry and settings
     struct Windows {
         QByteArray mainWindowGeometry;
@@ -176,6 +209,8 @@ private:
         Usb usb;
         Pic pic;
         Ui ui;
+        Audio audio;
+        Sdr sdr;
         Windows windows;
     } settings;
 

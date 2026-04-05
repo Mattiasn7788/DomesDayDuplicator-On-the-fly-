@@ -27,6 +27,12 @@ target_compile_definitions(DomesdayDuplicator PRIVATE
     QT_DEPRECATED_WARNINGS
 )
 
+# Maximise optimisation for Release builds with MinGW/GCC to close the
+# performance gap vs MSVC-compiled binaries.
+target_compile_options(DomesdayDuplicator PRIVATE
+    $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:GNU>>:-O3 -funroll-loops>
+)
+
 target_link_libraries(DomesdayDuplicator PRIVATE
     Qt::Core
     Qt::Gui

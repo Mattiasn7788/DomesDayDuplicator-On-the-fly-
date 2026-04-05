@@ -2,6 +2,7 @@
 #include "ILogger.h"
 #include "AudioResampler.h"
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -10,6 +11,7 @@
 #include <string>
 #include <vector>
 #include <atomic>
+#include <thread>
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
@@ -26,6 +28,7 @@ public:
         Signed16BitQuarter,
         Unsigned10Bit,
         Unsigned10Bit4to1Decimation,
+        Signed16BitFlacOnTheFly,         // on-the-fly FLAC via ffmpeg+flac pipe (any sample rate)
     };
     enum class TransferResult
     {
@@ -55,7 +58,7 @@ public:
     void SendConfigurationCommand(const std::string& preferredDevicePath, bool testMode);
 
     // Capture methods
-    bool StartCapture(const std::filesystem::path& filePath, CaptureFormat format, const std::string& preferredDevicePath, bool isTestMode, bool useSmallUsbTransfers, bool useAsyncFileIo, size_t usbTransferQueueSizeInBytes, size_t diskBufferQueueSizeInBytes);
+    bool StartCapture(const std::filesystem::path& filePath, CaptureFormat format, const std::string& preferredDevicePath, bool isTestMode, bool useSmallUsbTransfers, bool useAsyncFileIo, size_t usbTransferQueueSizeInBytes, size_t diskBufferQueueSizeInBytes, int flacCompressionLevel = 8, int flacOutputSampleRateInHz = 20000000);
     void StopCapture();
     bool GetTransferInProgress() const;
     TransferResult GetTransferResult() const;
@@ -212,6 +215,14 @@ private:
 #ifdef _WIN32
     HANDLE windowsCaptureOutputFileHandle;
 #endif
+
+    // On-the-fly FLAC pipe state
+    FILE* flacPipeHandle = nullptr;
+#ifdef _WIN32
+    HANDLE flacPipeProcess = INVALID_HANDLE_VALUE;
+    HANDLE flacReadPipeHandle = INVALID_HANDLE_VALUE;
+#endif
+    std::thread flacReaderThread;
 
     // Sequence/test data state
     SequenceState sequenceState = SequenceState::Sync;

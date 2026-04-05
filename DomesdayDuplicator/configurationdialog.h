@@ -30,6 +30,13 @@
 #include <QtSerialPort/QSerialPort>
 #include <QtSerialPort/QSerialPortInfo>
 #include <QAbstractButton>
+#include <QProcess>
+#include <QCheckBox>
+#include <QComboBox>
+#include <QLineEdit>
+#include <QPushButton>
+#include <QLabel>
+#include <QSpinBox>
 #include <vector>
 #include <string>
 #include <memory>
@@ -71,7 +78,29 @@ private slots:
 
 private:
     std::unique_ptr<Ui::ConfigurationDialog> ui;
-    
+
+    // Audio tab widgets (added programmatically)
+    QCheckBox*   audioCaptureCheckBox  = nullptr;
+    QLineEdit*   fmediaPathLineEdit    = nullptr;
+    QPushButton* fmediaPathBrowseBtn   = nullptr;
+    QComboBox*   audioDeviceComboBox   = nullptr;
+    QPushButton* audioDeviceRefreshBtn = nullptr;
+
+    void buildAudioTab();
+    void refreshAudioDevices();
+
+    // SDR HiFi tab widgets (added programmatically)
+    QCheckBox*   sdrEnabledCheckBox  = nullptr;
+    QLineEdit*   sdrPythonPathEdit   = nullptr;
+    QPushButton* sdrPythonBrowseBtn  = nullptr;
+    QLineEdit*   sdrScriptPathEdit   = nullptr;
+    QPushButton* sdrScriptBrowseBtn  = nullptr;
+    QComboBox*   sdrSystemComboBox   = nullptr;
+    QSpinBox*    sdrGainSpinBox       = nullptr;
+    QSpinBox*    sdrStartDelaySpinBox = nullptr;
+
+    void buildSdrTab();
+
     // Helper function for downsampling 16-bit signed audio data
     QByteArray downsampleAudio(const QByteArray& inputData, int downsampleFactor);
 };

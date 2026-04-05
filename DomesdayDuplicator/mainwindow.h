@@ -45,6 +45,9 @@
 #include <filesystem>
 #include <optional>
 #include <memory>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace Ui {
 class MainWindow;
@@ -113,6 +116,10 @@ private:
 private:
     void StopCapture();
     void StartCapture();
+    void StartAudioCapture(const std::filesystem::path& rfFilePath);
+    void StopAudioCapture();
+    void StartSdrCapture(const std::filesystem::path& rfFilePath);
+    void StopSdrCapture();
 
 private:
     const ILogger& log;
@@ -145,6 +152,14 @@ private:
     std::vector<AmplitudeRecord> amplitudeRecord;
     std::vector<TimeCodeRecord> playerTimeCodeRecord;
     std::vector<PlayerStatusRecord> playerStatusRecord;
+
+#ifdef _WIN32
+    PROCESS_INFORMATION fmediaProcessInfo = {};
+    bool fmediaRunning = false;
+    PROCESS_INFORMATION sdrProcessInfo = {};
+    bool sdrRunning = false;
+    HANDLE sdrJobHandle = nullptr;
+#endif
 
     bool isPlayerConnected = false;
     bool usbDevicePresentLastCheck = false;

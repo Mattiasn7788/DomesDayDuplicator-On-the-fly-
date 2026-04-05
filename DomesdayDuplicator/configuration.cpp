@@ -96,6 +96,23 @@ void Configuration::writeConfiguration()
     configuration->setValue("keyLock", settings.pic.keyLock);
     configuration->endGroup();
 
+    // Audio
+    configuration->beginGroup("audio");
+    configuration->setValue("audioCaptureEnabled", settings.audio.audioCaptureEnabled);
+    configuration->setValue("audioCaptureDeviceIndex", settings.audio.audioCaptureDeviceIndex);
+    configuration->setValue("fmediaPath", settings.audio.fmediaPath);
+    configuration->endGroup();
+
+    // SDR
+    configuration->beginGroup("sdr");
+    configuration->setValue("sdrEnabled", settings.sdr.sdrEnabled);
+    configuration->setValue("sdrPythonPath", settings.sdr.sdrPythonPath);
+    configuration->setValue("sdrScriptPath", settings.sdr.sdrScriptPath);
+    configuration->setValue("sdrSystem", settings.sdr.sdrSystem);
+    configuration->setValue("sdrGain", settings.sdr.sdrGain);
+    configuration->setValue("sdrStartDelayMs", settings.sdr.sdrStartDelayMs);
+    configuration->endGroup();
+
     // Windows
     configuration->beginGroup("windows");
     configuration->setValue("mainWindowGeometry", settings.windows.mainWindowGeometry);
@@ -122,7 +139,14 @@ void Configuration::readConfiguration()
     settings.capture.captureFormat = convertIntToCaptureFormat(configuration->value("captureFormat").toInt());
     settings.capture.flacCompressionLevel = configuration->value("flacCompressionLevel", 5).toInt(); // Default to level 5
     settings.capture.flacOutputFormat = configuration->value("flacOutputFormat", 0).toInt(); // Default to .flac
-    settings.capture.sampleRate = configuration->value("sampleRate", 0).toInt(); // Default to 40 MSPS
+    {
+        // Migrate old index-based values (0/1/2) to actual kHz values
+        int sr = configuration->value("sampleRate", 20000).toInt();
+        if      (sr == 0) sr = 40000;
+        else if (sr == 1) sr = 20000;
+        else if (sr == 2) sr = 10000;
+        settings.capture.sampleRate = sr;
+    }
     configuration->endGroup();
 
     // UI
@@ -153,6 +177,23 @@ void Configuration::readConfiguration()
     settings.pic.keyLock = configuration->value("keyLock").toBool();
     configuration->endGroup();
 
+    // Audio
+    configuration->beginGroup("audio");
+    settings.audio.audioCaptureEnabled = configuration->value("audioCaptureEnabled", false).toBool();
+    settings.audio.audioCaptureDeviceIndex = configuration->value("audioCaptureDeviceIndex", 1).toInt();
+    settings.audio.fmediaPath = configuration->value("fmediaPath", "").toString();
+    configuration->endGroup();
+
+    // SDR
+    configuration->beginGroup("sdr");
+    settings.sdr.sdrEnabled    = configuration->value("sdrEnabled", false).toBool();
+    settings.sdr.sdrPythonPath = configuration->value("sdrPythonPath", "").toString();
+    settings.sdr.sdrScriptPath = configuration->value("sdrScriptPath", "").toString();
+    settings.sdr.sdrSystem     = configuration->value("sdrSystem", "PAL").toString();
+    settings.sdr.sdrGain          = configuration->value("sdrGain", 0).toInt();
+    settings.sdr.sdrStartDelayMs  = configuration->value("sdrStartDelayMs", 4000).toInt();
+    configuration->endGroup();
+
     // Windows
     configuration->beginGroup("windows");
     settings.windows.mainWindowGeometry = configuration->value("mainWindowGeometry").toByteArray();
@@ -173,7 +214,7 @@ void Configuration::setDefault()
     settings.capture.captureFormat = CaptureFormat::tenBitPacked;
     settings.capture.flacCompressionLevel = 5; // Default to moderate compression
     settings.capture.flacOutputFormat = 0; // Default to .flac output
-    settings.capture.sampleRate = 0; // Default to 40 MSPS (full rate)
+    settings.capture.sampleRate = 20000; // Default to 20 MSPS
 
     // UI
     settings.ui.perSideNotesEnabled = false;
@@ -201,6 +242,19 @@ void Configuration::setDefault()
     settings.pic.serialDevice = tr("");
     settings.pic.serialSpeed = SerialSpeeds::autoDetect;
     settings.pic.keyLock = false;
+
+    // Audio
+    settings.audio.audioCaptureEnabled = false;
+    settings.audio.audioCaptureDeviceIndex = 1;
+    settings.audio.fmediaPath = "";
+
+    // SDR
+    settings.sdr.sdrEnabled    = false;
+    settings.sdr.sdrPythonPath = "";
+    settings.sdr.sdrScriptPath = "";
+    settings.sdr.sdrSystem     = "PAL";
+    settings.sdr.sdrGain          = 0;
+    settings.sdr.sdrStartDelayMs  = 4000;
 
     // Windows
     settings.windows.mainWindowGeometry = QByteArray();
@@ -532,3 +586,48 @@ QByteArray Configuration::getConfigurationDialogGeometry() const
 {
     return settings.windows.configurationDialogGeometry;
 }
+
+// Audio settings
+void Configuration::setAudioCaptureEnabled(bool enabled)
+{
+    settings.audio.audioCaptureEnabled = enabled;
+}
+
+bool Configuration::getAudioCaptureEnabled() const
+{
+    return settings.audio.audioCaptureEnabled;
+}
+
+void Configuration::setAudioCaptureDeviceIndex(int index)
+{
+    settings.audio.audioCaptureDeviceIndex = index;
+}
+
+int Configuration::getAudioCaptureDeviceIndex() const
+{
+    return settings.audio.audioCaptureDeviceIndex;
+}
+
+void Configuration::setFmediaPath(QString path)
+{
+    settings.audio.fmediaPath = path;
+}
+
+QString Configuration::getFmediaPath() const
+{
+    return settings.audio.fmediaPath;
+}
+
+// SDR settings
+void Configuration::setSdrEnabled(bool enabled) { settings.sdr.sdrEnabled = enabled; }
+bool Configuration::getSdrEnabled() const { return settings.sdr.sdrEnabled; }
+void Configuration::setSdrPythonPath(QString path) { settings.sdr.sdrPythonPath = path; }
+QString Configuration::getSdrPythonPath() const { return settings.sdr.sdrPythonPath; }
+void Configuration::setSdrScriptPath(QString path) { settings.sdr.sdrScriptPath = path; }
+QString Configuration::getSdrScriptPath() const { return settings.sdr.sdrScriptPath; }
+void Configuration::setSdrSystem(QString system) { settings.sdr.sdrSystem = system; }
+QString Configuration::getSdrSystem() const { return settings.sdr.sdrSystem; }
+void Configuration::setSdrGain(int gain) { settings.sdr.sdrGain = gain; }
+int Configuration::getSdrGain() const { return settings.sdr.sdrGain; }
+void Configuration::setSdrStartDelayMs(int ms) { settings.sdr.sdrStartDelayMs = ms; }
+int Configuration::getSdrStartDelayMs() const { return settings.sdr.sdrStartDelayMs; }

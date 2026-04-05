@@ -2,8 +2,11 @@ name: Compact Windows Build + Release
 
 on:
   push:
+    branches: [ master ]
     tags:
       - 'v*'
+  pull_request:
+    branches: [ master ]
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -81,10 +84,13 @@ jobs:
           find . -maxdepth 1 -type f ! -name "*.exe" ! -name "*.dll" -delete
           find . -maxdepth 1 -type d ! -name "." ! -name "platforms" ! -name "styles" -exec rm -rf {} +
 
+          # Include GNURadio HiFi scripts
+          cp -r ../GNURadio-Scripts ./GNURadio-Scripts
+
           echo "=== FINAL CONTENTS ==="
           ls -la
 
-          # Create clean zip - this is the method that worked for you before
+          # Create clean zip
           cd ..
           cd build
           zip -9 -r ../../DomesdayDuplicator_Flac+DownSampling.zip ./*

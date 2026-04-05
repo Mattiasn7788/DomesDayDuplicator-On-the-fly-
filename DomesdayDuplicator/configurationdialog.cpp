@@ -30,6 +30,11 @@
 #include "AudioResampler.h"
 #include <QProcess>
 #include <QFile>
+#include <QFileInfo>
+#include <QRegularExpression>
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QSizePolicy>
 #include <QDebug>
 
 ConfigurationDialog::ConfigurationDialog(QWidget *parent) :
@@ -40,15 +45,12 @@ ConfigurationDialog::ConfigurationDialog(QWidget *parent) :
 
     // Build the captureFormatComboBox
     ui->captureFormatComboBox->clear();
-    ui->captureFormatComboBox->addItem("16-bit FLAC", Configuration::CaptureFormat::flacDirect);
+    ui->captureFormatComboBox->addItem("8-bit FLAC", Configuration::CaptureFormat::flacDirect);
     ui->captureFormatComboBox->addItem("16-bit Signed Raw", Configuration::CaptureFormat::sixteenBitSigned);
     ui->captureFormatComboBox->addItem("10-bit Packed Unsigned", Configuration::CaptureFormat::tenBitPacked);
     
-    // Build the sampleRateComboBox
+    // sampleRateComboBox is populated dynamically in onCaptureFormatChanged()
     ui->sampleRateComboBox->clear();
-    ui->sampleRateComboBox->addItem("40 MSPS (Full Rate)", 0);
-    ui->sampleRateComboBox->addItem("20 MSPS (1/2 Rate)", 1);
-    ui->sampleRateComboBox->addItem("10 MSPS (1/4 Rate)", 2);
     
     // Build the flacOutputFormatComboBox
     ui->flacOutputFormatComboBox->clear();
@@ -101,10 +103,105 @@ ConfigurationDialog::ConfigurationDialog(QWidget *parent) :
             this, &ConfigurationDialog::onCaptureFormatChanged);
     connect(ui->sampleRateComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &ConfigurationDialog::onSampleRateChanged);
+
+    // Build the Audio tab programmatically
+    buildAudioTab();
+
+    // Build the SDR HiFi tab programmatically
+    buildSdrTab();
 }
 
 ConfigurationDialog::~ConfigurationDialog()
 {
+}
+
+void ConfigurationDialog::buildAudioTab()
+{
+    // Create the Audio tab page
+    QWidget* audioPage = new QWidget();
+    QVBoxLayout* vbox = new QVBoxLayout(audioPage);
+
+    // Enable checkbox
+    audioCaptureCheckBox = new QCheckBox(tr("Enable audio capture (fmedia)"), audioPage);
+    vbox->addWidget(audioCaptureCheckBox);
+
+    // fmedia path row
+    QHBoxLayout* pathRow = new QHBoxLayout();
+    pathRow->addWidget(new QLabel(tr("fmedia.exe path:"), audioPage));
+    fmediaPathLineEdit = new QLineEdit(audioPage);
+    fmediaPathLineEdit->setPlaceholderText(tr("Leave blank to auto-detect"));
+    pathRow->addWidget(fmediaPathLineEdit);
+    fmediaPathBrowseBtn = new QPushButton(tr("Browse"), audioPage);
+    fmediaPathBrowseBtn->setMinimumWidth(80);
+    pathRow->addWidget(fmediaPathBrowseBtn);
+    vbox->addLayout(pathRow);
+
+    // Device row
+    QHBoxLayout* devRow = new QHBoxLayout();
+    devRow->addWidget(new QLabel(tr("Capture device:"), audioPage));
+    audioDeviceComboBox = new QComboBox(audioPage);
+    audioDeviceComboBox->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    devRow->addWidget(audioDeviceComboBox);
+    audioDeviceRefreshBtn = new QPushButton(tr("Refresh"), audioPage);
+    devRow->addWidget(audioDeviceRefreshBtn);
+    vbox->addLayout(devRow);
+
+    // Info label
+    vbox->addWidget(new QLabel(tr("Audio saved as capture_name_audio.flac in capture directory."), audioPage));
+
+    vbox->addStretch();
+
+    // Add tab to tab widget
+    ui->tabWidget->addTab(audioPage, tr("Audio"));
+
+    // Connect buttons
+    connect(fmediaPathBrowseBtn, &QPushButton::clicked, this, [this]() {
+        QString path = QFileDialog::getOpenFileName(this, tr("Select fmedia.exe"),
+            fmediaPathLineEdit->text(), tr("Executable (*.exe);;All files (*)"));
+        if (!path.isEmpty()) fmediaPathLineEdit->setText(path);
+    });
+    connect(audioDeviceRefreshBtn, &QPushButton::clicked, this, [this]() {
+        refreshAudioDevices();
+    });
+}
+
+void ConfigurationDialog::refreshAudioDevices()
+{
+    QString fmediaExe = fmediaPathLineEdit->text().trimmed();
+    if (fmediaExe.isEmpty()) {
+        if (QFileInfo::exists("C:/Program Files/fmedia/fmedia.exe"))
+            fmediaExe = "C:/Program Files/fmedia/fmedia.exe";
+        else
+            fmediaExe = "fmedia";
+    }
+
+    audioDeviceComboBox->clear();
+
+    QProcess proc;
+    proc.start(fmediaExe, QStringList() << "--list-dev");
+    if (!proc.waitForFinished(5000)) {
+        audioDeviceComboBox->addItem(tr("fmedia not found — check path"), -1);
+        return;
+    }
+
+    QString output = proc.readAllStandardOutput() + proc.readAllStandardError();
+    bool inCapture = false;
+    QRegularExpression re("^device #(\\d+): (.+)$");
+    for (const QString& line : output.split('\n')) {
+        QString t = line.trimmed();
+        if (t.startsWith("Capture:")) { inCapture = true; continue; }
+        if (!inCapture) continue;
+        auto m = re.match(t);
+        if (m.hasMatch()) {
+            int devNum = m.captured(1).toInt();
+            QString name = m.captured(2).trimmed();
+            name.remove(QRegularExpression("\\s*-\\s*Default\\s*$", QRegularExpression::CaseInsensitiveOption));
+            audioDeviceComboBox->addItem(QString("#%1: %2").arg(devNum).arg(name), devNum);
+        }
+    }
+
+    if (audioDeviceComboBox->count() == 0)
+        audioDeviceComboBox->addItem(tr("No capture devices found"), -1);
 }
 
 void ConfigurationDialog::updateDeviceList(const std::vector<std::string>& deviceList)
@@ -127,21 +224,28 @@ void ConfigurationDialog::loadConfiguration(const Configuration& configuration)
     
     // Handle capture format and sample rate loading
     Configuration::CaptureFormat configFormat = configuration.getCaptureFormat();
-    int sampleRateIndex = 0;  // Default to full rate
-    
-    // Map combined formats to separate format + sample rate
+    int storedSampleRateKHz = configuration.getSampleRate(); // kHz value
+
+    // Map combined raw formats to base format (sample rate already stored as kHz)
     if (configFormat == Configuration::CaptureFormat::sixteenBitSigned_Half) {
         ui->captureFormatComboBox->setCurrentIndex(ui->captureFormatComboBox->findData(static_cast<unsigned int>(Configuration::CaptureFormat::sixteenBitSigned)));
-        sampleRateIndex = 1;  // 1/2 rate
+        storedSampleRateKHz = 20000;
     } else if (configFormat == Configuration::CaptureFormat::sixteenBitSigned_Quarter) {
         ui->captureFormatComboBox->setCurrentIndex(ui->captureFormatComboBox->findData(static_cast<unsigned int>(Configuration::CaptureFormat::sixteenBitSigned)));
-        sampleRateIndex = 2;  // 1/4 rate
+        storedSampleRateKHz = 10000;
     } else {
         ui->captureFormatComboBox->setCurrentIndex(ui->captureFormatComboBox->findData(static_cast<unsigned int>(configFormat)));
-        sampleRateIndex = configuration.getSampleRate();  // Use stored sample rate
     }
-    
-    ui->sampleRateComboBox->setCurrentIndex(sampleRateIndex);
+
+    // Force-rebuild the sampleRateComboBox for the current format. If the format
+    // didn't change, setCurrentIndex() above emits no signal, leaving the combo
+    // empty. Calling onCaptureFormatChanged() directly ensures it is always
+    // populated before we try to restore the stored sample rate.
+    onCaptureFormatChanged(ui->captureFormatComboBox->currentIndex());
+
+    int sampleRateItemIndex = ui->sampleRateComboBox->findData(storedSampleRateKHz);
+    if (sampleRateItemIndex < 0) sampleRateItemIndex = 0;  // fallback to first item
+    ui->sampleRateComboBox->setCurrentIndex(sampleRateItemIndex);
     ui->flacCompressionLevelComboBox->setCurrentIndex(ui->flacCompressionLevelComboBox->findData(configuration.getFlacCompressionLevel()));
     ui->flacOutputFormatComboBox->setCurrentIndex(configuration.getFlacOutputFormat());
 
@@ -201,7 +305,28 @@ void ConfigurationDialog::loadConfiguration(const Configuration& configuration)
     
     // Theme
     ui->themeComboBox->setCurrentIndex(configuration.getThemeStyle());
-    
+
+    // Audio capture
+    audioCaptureCheckBox->setChecked(configuration.getAudioCaptureEnabled());
+    fmediaPathLineEdit->setText(configuration.getFmediaPath());
+    // Populate device list and restore saved selection
+    refreshAudioDevices();
+    int savedDeviceIndex = configuration.getAudioCaptureDeviceIndex();
+    for (int i = 0; i < audioDeviceComboBox->count(); ++i) {
+        if (audioDeviceComboBox->itemData(i).toInt() == savedDeviceIndex) {
+            audioDeviceComboBox->setCurrentIndex(i);
+            break;
+        }
+    }
+
+    // SDR HiFi
+    sdrEnabledCheckBox->setChecked(configuration.getSdrEnabled());
+    sdrPythonPathEdit->setText(configuration.getSdrPythonPath());
+    sdrScriptPathEdit->setText(configuration.getSdrScriptPath());
+    sdrSystemComboBox->setCurrentIndex(configuration.getSdrSystem() == "NTSC" ? 1 : 0);
+    sdrGainSpinBox->setValue(configuration.getSdrGain());
+    sdrStartDelaySpinBox->setValue(configuration.getSdrStartDelayMs() / 1000);
+
     // Update FLAC control visibility based on selected format
     onCaptureFormatChanged(ui->captureFormatComboBox->currentIndex());
 }
@@ -216,44 +341,32 @@ void ConfigurationDialog::saveConfiguration(Configuration& configuration)
     
     // Combine capture format and sample rate into final format
     Configuration::CaptureFormat baseFormat = static_cast<Configuration::CaptureFormat>(ui->captureFormatComboBox->itemData(ui->captureFormatComboBox->currentIndex()).toInt());
-    int sampleRateIndex = ui->sampleRateComboBox->currentIndex();
+    int sampleRateKHz = ui->sampleRateComboBox->currentData().toInt(); // stored as kHz
     int flacOutputFormat = ui->flacOutputFormatComboBox->currentIndex();
-    
+
     Configuration::CaptureFormat finalFormat = baseFormat;
-    
-    // Handle 16-bit signed raw format with sample rate
+
+    // For 16-bit raw: encode sample rate into the format enum (backward compat)
     if (baseFormat == Configuration::CaptureFormat::sixteenBitSigned) {
-        if (sampleRateIndex == 1) {
+        if (sampleRateKHz == 20000) {
             finalFormat = Configuration::CaptureFormat::sixteenBitSigned_Half;
-        } else if (sampleRateIndex == 2) {
+        } else if (sampleRateKHz == 10000) {
             finalFormat = Configuration::CaptureFormat::sixteenBitSigned_Quarter;
         }
-        // else keep as sixteenBitSigned (full rate)
+        // else keep as sixteenBitSigned (40 MSPS full rate)
     }
-    // Handle FLAC format - choose between ldfCompressed and flacDirect based on output format
-    // Also apply sample rate selection to FLAC formats
+    // For FLAC: choose ldfCompressed vs flacDirect based on output format dropdown
     else if (baseFormat == Configuration::CaptureFormat::flacDirect) {
         if (flacOutputFormat == 1) {
-            // .ldf output - always use ldfCompressed for now
             finalFormat = Configuration::CaptureFormat::ldfCompressed;
-        } else {
-            // .flac output - apply sample rate downsampling to flacDirect
-            if (sampleRateIndex == 1) {
-                // Store sample rate preference in configuration for MainWindow to use
-                // We'll create new FLAC format variants for downsampling
-                finalFormat = Configuration::CaptureFormat::flacDirect;  // Keep base format
-            } else if (sampleRateIndex == 2) {
-                finalFormat = Configuration::CaptureFormat::flacDirect;  // Keep base format
-            } else {
-                finalFormat = Configuration::CaptureFormat::flacDirect;  // Full rate
-            }
         }
+        // else stay as flacDirect; sample rate stored separately as kHz
     }
-    
+
     configuration.setCaptureFormat(finalFormat);
     configuration.setFlacCompressionLevel(ui->flacCompressionLevelComboBox->itemData(ui->flacCompressionLevelComboBox->currentIndex()).toInt());
     configuration.setFlacOutputFormat(ui->flacOutputFormatComboBox->currentIndex());
-    configuration.setSampleRate(sampleRateIndex);
+    configuration.setSampleRate(sampleRateKHz); // store actual kHz
 
     // USB
     configuration.setUsbVid(static_cast<quint16>(ui->vendorIdLineEdit->text().toInt()));
@@ -285,8 +398,97 @@ void ConfigurationDialog::saveConfiguration(Configuration& configuration)
     // Theme
     configuration.setThemeStyle(ui->themeComboBox->currentIndex());
 
+    // Audio capture
+    configuration.setAudioCaptureEnabled(audioCaptureCheckBox->isChecked());
+    configuration.setFmediaPath(fmediaPathLineEdit->text());
+    configuration.setAudioCaptureDeviceIndex(audioDeviceComboBox->currentData().toInt());
+
+    // SDR HiFi
+    configuration.setSdrEnabled(sdrEnabledCheckBox->isChecked());
+    configuration.setSdrPythonPath(sdrPythonPathEdit->text());
+    configuration.setSdrScriptPath(sdrScriptPathEdit->text());
+    configuration.setSdrSystem(sdrSystemComboBox->currentData().toString());
+    configuration.setSdrGain(sdrGainSpinBox->value());
+    configuration.setSdrStartDelayMs(sdrStartDelaySpinBox->value() * 1000);
+
     // Save the configuration to disk
     configuration.writeConfiguration();
+}
+
+void ConfigurationDialog::buildSdrTab()
+{
+    QWidget* page = new QWidget();
+    QVBoxLayout* vbox = new QVBoxLayout(page);
+
+    // Enable checkbox
+    sdrEnabledCheckBox = new QCheckBox(tr("Enable SDR HiFi capture (GNURadio)"), page);
+    vbox->addWidget(sdrEnabledCheckBox);
+
+    // Python path row
+    QHBoxLayout* pyRow = new QHBoxLayout();
+    pyRow->addWidget(new QLabel(tr("Python path:"), page));
+    sdrPythonPathEdit = new QLineEdit(page);
+    sdrPythonPathEdit->setPlaceholderText(tr("Leave blank to use C:\\ProgramData\\radioconda\\python.exe"));
+    pyRow->addWidget(sdrPythonPathEdit);
+    sdrPythonBrowseBtn = new QPushButton(tr("Browse"), page);
+    sdrPythonBrowseBtn->setMinimumWidth(80);
+    pyRow->addWidget(sdrPythonBrowseBtn);
+    vbox->addLayout(pyRow);
+
+    // Script path row
+    QHBoxLayout* scriptRow = new QHBoxLayout();
+    scriptRow->addWidget(new QLabel(tr("Script path:"), page));
+    sdrScriptPathEdit = new QLineEdit(page);
+    sdrScriptPathEdit->setPlaceholderText(tr("Path to rtlsdr_to_flac.py"));
+    scriptRow->addWidget(sdrScriptPathEdit);
+    sdrScriptBrowseBtn = new QPushButton(tr("Browse"), page);
+    sdrScriptBrowseBtn->setMinimumWidth(80);
+    scriptRow->addWidget(sdrScriptBrowseBtn);
+    vbox->addLayout(scriptRow);
+
+    // System + Gain row
+    QHBoxLayout* optRow = new QHBoxLayout();
+    optRow->addWidget(new QLabel(tr("TV System:"), page));
+    sdrSystemComboBox = new QComboBox(page);
+    sdrSystemComboBox->addItem("PAL",  QString("PAL"));
+    sdrSystemComboBox->addItem("NTSC", QString("NTSC"));
+    optRow->addWidget(sdrSystemComboBox);
+    optRow->addSpacing(20);
+    optRow->addWidget(new QLabel(tr("Gain (0=auto):"), page));
+    sdrGainSpinBox = new QSpinBox(page);
+    sdrGainSpinBox->setRange(0, 50);
+    sdrGainSpinBox->setValue(0);
+    optRow->addWidget(sdrGainSpinBox);
+    optRow->addStretch();
+    vbox->addLayout(optRow);
+
+    // Start delay row
+    QHBoxLayout* delayRow = new QHBoxLayout();
+    delayRow->addWidget(new QLabel(tr("Start delay (seconds):"), page));
+    sdrStartDelaySpinBox = new QSpinBox(page);
+    sdrStartDelaySpinBox->setRange(0, 30);
+    sdrStartDelaySpinBox->setValue(4);
+    sdrStartDelaySpinBox->setToolTip(tr("Delay before starting SDR capture after RF capture begins.\nIncrease if you get USB buffer underflow errors."));
+    delayRow->addWidget(sdrStartDelaySpinBox);
+    delayRow->addStretch();
+    vbox->addLayout(delayRow);
+
+    vbox->addWidget(new QLabel(tr("Output saved as capture_name_hifi.flac and capture_name_hifi.u8"), page));
+    vbox->addStretch();
+
+    ui->tabWidget->addTab(page, tr("SDR HiFi"));
+
+    // Connect browse buttons
+    connect(sdrPythonBrowseBtn, &QPushButton::clicked, this, [this]() {
+        QString path = QFileDialog::getOpenFileName(this, tr("Select python.exe"),
+            sdrPythonPathEdit->text(), tr("Executable (*.exe);;All files (*)"));
+        if (!path.isEmpty()) sdrPythonPathEdit->setText(path);
+    });
+    connect(sdrScriptBrowseBtn, &QPushButton::clicked, this, [this]() {
+        QString path = QFileDialog::getOpenFileName(this, tr("Select GNURadio script"),
+            sdrScriptPathEdit->text(), tr("Python script (*.py);;All files (*)"));
+        if (!path.isEmpty()) sdrScriptPathEdit->setText(path);
+    });
 }
 
 // Browse for capture directory button clicked
@@ -698,17 +900,46 @@ void ConfigurationDialog::onCaptureFormatChanged(int index)
     
     // Show FLAC-related controls only for FLAC format
     bool showFlacControls = (selectedFormat == Configuration::CaptureFormat::flacDirect);
-    
+
     ui->flacCompressionLabel->setVisible(showFlacControls);
     ui->flacCompressionLevelComboBox->setVisible(showFlacControls);
     ui->flacOutputFormatLabel->setVisible(showFlacControls);
     ui->flacOutputFormatComboBox->setVisible(showFlacControls);
-    
+
     // Show sample rate control for 16-bit formats (both raw and FLAC)
     bool showSampleRateControls = (selectedFormat == Configuration::CaptureFormat::sixteenBitSigned ||
-                                  selectedFormat == Configuration::CaptureFormat::flacDirect);
+                                   selectedFormat == Configuration::CaptureFormat::flacDirect);
     ui->sampleRateLabel->setVisible(showSampleRateControls);
     ui->sampleRateComboBox->setVisible(showSampleRateControls);
+
+    if (!showSampleRateControls)
+        return;
+
+    // Rebuild sample rate combo with format-appropriate options (stored as kHz)
+    int prevKHz = ui->sampleRateComboBox->currentData().toInt();
+    ui->sampleRateComboBox->blockSignals(true);
+    ui->sampleRateComboBox->clear();
+
+    if (selectedFormat == Configuration::CaptureFormat::flacDirect) {
+        // FLAC via ffmpeg soxr — any rate works; offer all useful RF digitisation rates
+        ui->sampleRateComboBox->addItem("40 MSPS",                40000);
+        ui->sampleRateComboBox->addItem("28 MSPS",                28000);
+        ui->sampleRateComboBox->addItem("24 MSPS (S-VHS/Video8)", 24000);
+        ui->sampleRateComboBox->addItem("20 MSPS (VHS PAL)",       20000);
+        ui->sampleRateComboBox->addItem("18 MSPS",                18000);
+        ui->sampleRateComboBox->addItem("16 MSPS",                16000);
+        ui->sampleRateComboBox->addItem("10 MSPS",                10000);
+    } else {
+        // Raw 16-bit — software downsampling supports integer fractions only
+        ui->sampleRateComboBox->addItem("40 MSPS (Full Rate)", 40000);
+        ui->sampleRateComboBox->addItem("20 MSPS (1/2 Rate)", 20000);
+        ui->sampleRateComboBox->addItem("10 MSPS (1/4 Rate)", 10000);
+    }
+
+    // Restore previous selection if available, else default to first item
+    int idx = ui->sampleRateComboBox->findData(prevKHz);
+    ui->sampleRateComboBox->setCurrentIndex(idx >= 0 ? idx : 0);
+    ui->sampleRateComboBox->blockSignals(false);
 }
 
 void ConfigurationDialog::onSampleRateChanged(int index)
