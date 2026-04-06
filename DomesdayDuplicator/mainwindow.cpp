@@ -1583,22 +1583,22 @@ void MainWindow::StartAudioCapture(const std::filesystem::path& rfFilePath)
     if (pid == 0) {
         // Child: connect read end of pipe to stdin, close write end
         dup2(pipefd[0], STDIN_FILENO);
-        close(pipefd[0]);
-        close(pipefd[1]);
+        ::close(pipefd[0]);
+        ::close(pipefd[1]);
         execlp(fmediaExe.c_str(), fmediaExe.c_str(),
                "--record", outArg.c_str(), devArg.c_str(), nullptr);
         _exit(1);
     } else if (pid > 0) {
         // Parent: keep write end open, close read end
-        close(pipefd[0]);
+        ::close(pipefd[0]);
         fmediaPid = pid;
         fmediaStdinFd = pipefd[1];
         fmediaRunning = true;
         qDebug() << "MainWindow::StartAudioCapture(): Started fmedia, pid=" << pid
                  << "out=" << QString::fromStdString(audioFilePath.string());
     } else {
-        close(pipefd[0]);
-        close(pipefd[1]);
+        ::close(pipefd[0]);
+        ::close(pipefd[1]);
         fmediaRunning = false;
         qDebug() << "MainWindow::StartAudioCapture(): fork() failed";
     }
@@ -1610,8 +1610,8 @@ void MainWindow::StopAudioCapture()
 
     // Write 's' to fmedia's stdin — same as pressing 's' in the terminal for a clean flush
     if (fmediaStdinFd >= 0) {
-        write(fmediaStdinFd, "s\n", 2);
-        close(fmediaStdinFd);
+        ::write(fmediaStdinFd, "s\n", 2);
+        ::close(fmediaStdinFd);
         fmediaStdinFd = -1;
     }
 
