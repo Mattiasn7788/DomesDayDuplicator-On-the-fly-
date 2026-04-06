@@ -163,6 +163,7 @@ private:
     HANDLE sdrJobHandle = nullptr;
 #elif defined(__APPLE__) || defined(__linux__)
     pid_t fmediaPid = -1;
+    int fmediaStdinFd = -1;  // write end of pipe connected to fmedia's stdin
     bool fmediaRunning = false;
 #endif
 
