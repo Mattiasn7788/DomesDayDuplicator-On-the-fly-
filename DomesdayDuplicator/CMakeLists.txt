@@ -26,6 +26,14 @@ qt_add_resources(DomesdayDuplicator_SOURCES resources.qrc)
 add_executable(DomesdayDuplicator WIN32 MACOSX_BUNDLE
     ${DomesdayDuplicator_SOURCES})
 
+if(APPLE)
+    set_target_properties(DomesdayDuplicator PROPERTIES
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/MacOSXBundleInfo.plist.in"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "com.domesdayduplicator.app"
+        MACOSX_BUNDLE_BUNDLE_NAME "DomesdayDuplicator"
+    )
+endif()
+
 target_compile_definitions(DomesdayDuplicator PRIVATE
     QT_DEPRECATED_WARNINGS
 )
