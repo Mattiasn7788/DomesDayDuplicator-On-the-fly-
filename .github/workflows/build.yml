@@ -141,6 +141,8 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: true
+          body: |
+            **Known issue:** The SDR HiFi tab output path does not support non-ASCII characters (å, ä, ö etc.) on Windows. Use a path with only ASCII characters until this is fixed.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
