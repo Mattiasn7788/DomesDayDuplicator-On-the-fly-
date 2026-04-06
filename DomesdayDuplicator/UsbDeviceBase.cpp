@@ -1039,7 +1039,15 @@ void UsbDeviceBase::ProcessingThread()
                 bufferEntry.isDiskBufferFull.clear();
                 bufferEntry.isDiskBufferFull.notify_all();
                 ++transferBufferWrittenCount;
-                // transferFileSizeWrittenInBytes is updated by the flac reader thread (FLAC bytes)
+#ifdef __APPLE__
+                // On macOS flac writes directly to the output file; poll its size so the GUI counter updates.
+                {
+                    std::error_code ec;
+                    auto sz = std::filesystem::file_size(captureFilePath, ec);
+                    if (!ec) transferFileSizeWrittenInBytes = sz;
+                }
+#endif
+                // On Windows transferFileSizeWrittenInBytes is updated by the flac reader thread
             }
             else
             {
