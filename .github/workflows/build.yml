@@ -271,20 +271,30 @@ jobs:
             echo "WARNING: ffmpeg binary not found at $HOME/ffmpeg-compat/bin/ffmpeg"
           fi
 
-          # Bundle the flac binary and fix its dylib dependencies.
-          # Homebrew flac links against libFLAC with an absolute Cellar path; we must
-          # copy libFLAC (and any other non-system deps) into Frameworks/ and rewrite
-          # the install names so flac finds them via @rpath inside the bundle.
+          # Bundle the flac binary and resolve all dylib dependencies transitively.
+          # Homebrew flac links libFLAC with an absolute Cellar path, and libFLAC
+          # itself depends on libogg — both must be copied into Frameworks/ and
+          # have their install names rewritten to @rpath.
           FLAC_BIN="$(brew --prefix flac)/bin/flac"
           if [ -f "$FLAC_BIN" ]; then
             cp "$FLAC_BIN" "$APP_MACOS/"
             install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_MACOS/flac" 2>/dev/null || true
-            # Copy and rewrite all non-system dylib deps (Homebrew paths under /usr/local or /opt)
-            for dep in $(otool -L "$APP_MACOS/flac" | tail -n +2 | awk '{print $1}' | grep -E "^/usr/local|^/opt"); do
-              dep_base=$(basename "$dep")
-              cp -n "$dep" "$APP_FW/$dep_base" 2>/dev/null || true
-              install_name_tool -id "@rpath/$dep_base" "$APP_FW/$dep_base" 2>/dev/null || true
-              install_name_tool -change "$dep" "@rpath/$dep_base" "$APP_MACOS/flac" 2>/dev/null || true
+            # Iteratively copy and rewrite Homebrew deps until no new ones are found
+            changed=1
+            while [ $changed -eq 1 ]; do
+              changed=0
+              for src in "$APP_MACOS/flac" "$APP_FW"/libFLAC*.dylib "$APP_FW"/libogg*.dylib; do
+                [ -f "$src" ] || continue
+                for dep in $(otool -L "$src" | tail -n +2 | awk '{print $1}' | grep -E "^/usr/local|^/opt"); do
+                  dep_base=$(basename "$dep")
+                  if [ ! -f "$APP_FW/$dep_base" ]; then
+                    cp "$dep" "$APP_FW/$dep_base" 2>/dev/null || true
+                    install_name_tool -id "@rpath/$dep_base" "$APP_FW/$dep_base" 2>/dev/null || true
+                    changed=1
+                  fi
+                  install_name_tool -change "$dep" "@rpath/$dep_base" "$src" 2>/dev/null || true
+                done
+              done
             done
             strip "$APP_MACOS/flac" 2>/dev/null || true
             echo "=== flac binary bundled ==="
