@@ -1595,8 +1595,8 @@ void MainWindow::StopAudioCapture()
 {
     if (!fmediaRunning || fmediaPid <= 0) return;
 
-    // SIGTERM lets fmedia flush and close the FLAC file cleanly
-    kill(fmediaPid, SIGTERM);
+    // SIGINT lets fmedia flush and close the FLAC file cleanly (same as Ctrl+C)
+    kill(fmediaPid, SIGINT);
 
     // Wait up to 5 seconds for a clean exit
     for (int i = 0; i < 50; i++) {

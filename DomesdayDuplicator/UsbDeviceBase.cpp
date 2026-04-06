@@ -257,7 +257,7 @@ bool UsbDeviceBase::StartCapture(const std::filesystem::path& filePath, CaptureF
             // On macOS use the built-in SWR resampler to avoid a libsoxr dylib loading
             // issue when ffmpeg is launched as a child process from the app bundle.
             std::string cmd = ffmpegCmd + " -hide_banner -loglevel error -f s16le -ar 40000000 -ac 1 -i pipe:0 "
-                + "-af aresample=" + std::to_string(ffmpegResampleRate) + " "
+                + "-af aresample=" + std::to_string(ffmpegResampleRate) + ":resampler=soxr:precision=28 "
                 + "-sample_fmt u8 -f u8 - "
                 + "2>/tmp/ddd_ffmpeg_err.log | "
                 + flacCmd + " -" + std::to_string(level) + " --bps=8 --sign=unsigned --channels=1 --endian=little "
