@@ -47,6 +47,9 @@
 #include <signal.h>
 #include <sys/wait.h>
 #endif
+#ifdef __APPLE__
+#include "macos_permissions.h"
+#endif
 #include "json/json.hpp"
 #include <QApplication>
 #include <QPalette>
@@ -1573,6 +1576,13 @@ void MainWindow::StartAudioCapture(const std::filesystem::path& rfFilePath)
     int deviceIndex = configuration->getAudioCaptureDeviceIndex();
     std::string outArg = "--out=" + audioFilePath.string();
     std::string devArg = "--dev-capture=" + std::to_string(deviceIndex);
+
+    // Request microphone permission — triggers the macOS permission dialog if not yet granted.
+    // The callback fires asynchronously but we proceed immediately; if permission was already
+    // granted this is a no-op, and if just granted the fork below will succeed.
+    requestMicrophonePermission([](bool granted) {
+        qDebug() << "MainWindow::StartAudioCapture(): microphone permission granted=" << granted;
+    });
 
     // Create a pipe for fmedia's stdin so it doesn't get EOF and exit immediately.
     // fmedia waits for 's' on stdin to stop — we write it when stopping.

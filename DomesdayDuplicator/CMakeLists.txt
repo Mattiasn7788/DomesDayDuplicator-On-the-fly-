@@ -21,6 +21,10 @@ if(WIN32)
     list(APPEND DomesdayDuplicator_SOURCES UsbDeviceWinUsb.cpp)
 endif()
 
+if(APPLE)
+    list(APPEND DomesdayDuplicator_SOURCES macos_permissions.mm)
+endif()
+
 qt_add_resources(DomesdayDuplicator_SOURCES resources.qrc)
 
 add_executable(DomesdayDuplicator WIN32 MACOSX_BUNDLE
@@ -32,6 +36,7 @@ if(APPLE)
         MACOSX_BUNDLE_GUI_IDENTIFIER "com.domesdayduplicator.app"
         MACOSX_BUNDLE_BUNDLE_NAME "DomesdayDuplicator"
     )
+    target_link_libraries(DomesdayDuplicator PRIVATE "-framework AVFoundation")
 endif()
 
 target_compile_definitions(DomesdayDuplicator PRIVATE
