@@ -172,7 +172,7 @@ bool UsbDeviceBase::StartCapture(const std::filesystem::path& filePath, CaptureF
     if (format == CaptureFormat::Signed16BitFlacOnTheFly)
     {
         // Open an on-the-fly pipe: ffmpeg (s16le 40MSPS) → resample → u8 → flac → our stdout reader → file
-        int outputSampleRate = flacOutputSampleRateInHz;
+        int outputSampleRate = flacOutputSampleRateInHz / 1000;
         int flacSampleRate   = flacOutputSampleRateInHz / 1000;
         int level = (flacCompressionLevel >= 0 && flacCompressionLevel <= 8) ? flacCompressionLevel : 8;
 
@@ -232,8 +232,8 @@ bool UsbDeviceBase::StartCapture(const std::filesystem::path& filePath, CaptureF
                     std::filesystem::path execDir = std::filesystem::path(execPath).parent_path();
                     std::filesystem::path ffmpegLocal = execDir / "ffmpeg";
                     std::filesystem::path flacLocal   = execDir / "flac";
-                    if (std::filesystem::exists(ffmpegLocal)) ffmpegCmd = ffmpegLocal.string();
-                    if (std::filesystem::exists(flacLocal))   flacCmd   = flacLocal.string();
+                    if (std::filesystem::exists(ffmpegLocal)) ffmpegCmd = "\"" + ffmpegLocal.string() + "\"";
+                    if (std::filesystem::exists(flacLocal))   flacCmd   = "\"" + flacLocal.string() + "\"";
                 }
             }
 #endif

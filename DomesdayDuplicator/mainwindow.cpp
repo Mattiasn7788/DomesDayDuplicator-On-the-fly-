@@ -1660,18 +1660,11 @@ void MainWindow::updateAmplitudeLabel()
 void MainWindow::updateAmplitudeUI()
 {
     // If any amplitude display is enabled, capture amplitude data.
-    // On macOS the USB stack has higher latency; polling the USB buffer for amplitude
-    // data competes with the capture thread and causes USB underflow errors, so we
-    // disable the buffer-sampling callback on macOS.
-#ifndef __APPLE__
     if (configuration->getAmplitudeLabelEnabled() || configuration->getAmplitudeChartEnabled()) {
         connect(amplitudeTimer.get(), SIGNAL(timeout()), this, SLOT(updateAmplitudeDataBuffer()));
     } else {
         disconnect(amplitudeTimer.get(), SIGNAL(timeout()), this, SLOT(updateAmplitudeDataBuffer()));
     }
-#else
-    disconnect(amplitudeTimer.get(), SIGNAL(timeout()), this, SLOT(updateAmplitudeDataBuffer()));
-#endif
 
     // Update amplitude label, driven by timer
     if (configuration->getAmplitudeLabelEnabled()) {
