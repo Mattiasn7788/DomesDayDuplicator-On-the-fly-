@@ -1582,8 +1582,8 @@ void MainWindow::StartAudioCapture(const std::filesystem::path& rfFilePath)
     pid_t pid = fork();
     if (pid == 0) {
         // Redirect stdout+stderr to a log file so we can diagnose fmedia issues
-        int logfd = ::open("/tmp/ddd_fmedia.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (logfd >= 0) { dup2(logfd, STDOUT_FILENO); dup2(logfd, STDERR_FILENO); ::close(logfd); }
+        FILE* logf = fopen("/tmp/ddd_fmedia.log", "w");
+        if (logf) { int lfd = fileno(logf); dup2(lfd, STDOUT_FILENO); dup2(lfd, STDERR_FILENO); fclose(logf); }
 
         // chdir to fmedia's directory so it can find its fmedia.conf config file
         std::filesystem::path fmediaDir = std::filesystem::path(fmediaExe).parent_path();
