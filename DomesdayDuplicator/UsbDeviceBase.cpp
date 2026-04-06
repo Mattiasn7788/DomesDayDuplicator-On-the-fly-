@@ -88,6 +88,10 @@ static FILE* openPipeNoWindow(const std::wstring& cmd, HANDLE& outProcess, HANDL
 #include <thread>
 #include <functional>
 #include <cassert>
+#ifdef __APPLE__
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 //----------------------------------------------------------------------------------------------------------------------
 // Constructors
@@ -311,6 +315,7 @@ bool UsbDeviceBase::StartCapture(const std::filesystem::path& filePath, CaptureF
         else
         {
 #endif
+#ifndef __APPLE__
             captureOutputFile.clear();
             captureOutputFile.rdbuf()->pubsetbuf(0, 0);
             captureOutputFile.open(filePath, std::ios::out | std::ios::trunc | std::ios::binary);
@@ -320,10 +325,28 @@ bool UsbDeviceBase::StartCapture(const std::filesystem::path& filePath, CaptureF
                 captureResult = TransferResult::FileCreationError;
                 return false;
             }
+#endif
 #ifdef _WIN32
         }
 #endif
 #ifdef __APPLE__
+        // On macOS, bypass the page cache to prevent dirty-page write throttling.
+        // std::ofstream routes through the page cache and gets throttled to ~13 MB/s when
+        // dirty pages accumulate, which is slower than the 80 MB/s USB input rate.
+        // open() + F_NOCACHE writes directly to disk at full disk speed (~100+ MB/s),
+        // which is faster than the USB input rate and allows indefinite capture.
+        macosOutputFd = ::open(filePath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (macosOutputFd < 0)
+        {
+            Log().Error("StartCapture(): Failed to create output file at path {0} (errno {1})", filePath, errno);
+            captureResult = TransferResult::FileCreationError;
+            return false;
+        }
+        if (::fcntl(macosOutputFd, F_NOCACHE, 1) < 0)
+        {
+            Log().Warning("StartCapture(): F_NOCACHE not available, page-cache throttling may cause capture stalls");
+        }
+
         // Launch the off-thread writer so the processing thread never blocks on disk I/O
         macosWriteFillBuffer.clear();
         macosWriteFillBuffer.reserve(macosWriteChunkBytes);
@@ -463,7 +486,7 @@ void UsbDeviceBase::StopCapture()
 #endif
 #ifdef __APPLE__
             // Flush any remaining data in the fill buffer and stop the write thread before
-            // closing the file, so all data is written and fsynced in order.
+            // closing the file, so all data is written in order.
             if (macosWriteThread.joinable())
             {
                 {
@@ -478,8 +501,14 @@ void UsbDeviceBase::StopCapture()
                 macosWriteCv.notify_all();
                 macosWriteThread.join();
             }
-#endif
+            if (macosOutputFd >= 0)
+            {
+                ::close(macosOutputFd);
+                macosOutputFd = -1;
+            }
+#else
             captureOutputFile.close();
+#endif
 #ifdef _WIN32
         }
 #endif
@@ -1201,13 +1230,22 @@ void UsbDeviceBase::MacosWriteThread()
         // Notify the processing thread that a slot in the queue is free
         macosWriteCv.notify_all();
 
-        captureOutputFile.write(reinterpret_cast<const char*>(chunk.data()), static_cast<std::streamsize>(chunk.size()));
-        if (!captureOutputFile.good())
+        const uint8_t* ptr = chunk.data();
+        ssize_t remaining = static_cast<ssize_t>(chunk.size());
+        while (remaining > 0)
         {
-            Log().Error("MacosWriteThread(): An error occurred when writing to the output file");
-            macosWriteError.store(true);
-            break;
+            ssize_t n = ::write(macosOutputFd, ptr, static_cast<size_t>(remaining));
+            if (n < 0)
+            {
+                if (errno == EINTR) continue;
+                Log().Error("MacosWriteThread(): write() failed with errno {0}", errno);
+                macosWriteError.store(true);
+                break;
+            }
+            ptr += n;
+            remaining -= n;
         }
+        if (macosWriteError.load()) break;
     }
 }
 #endif

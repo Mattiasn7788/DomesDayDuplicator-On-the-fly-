@@ -230,6 +230,7 @@ private:
     bool macosWriteThreadExit = false;
     std::atomic<bool> macosWriteError{false};
     std::thread macosWriteThread;
+    int macosOutputFd = -1;
     void MacosWriteThread();
 #endif
 
