@@ -166,6 +166,7 @@ private:
     int fmediaStdinFd = -1;  // write end of pipe connected to fmedia's stdin
     bool fmediaRunning = false;
     pid_t sdrPid = -1;
+    int sdrStdinFd = -1;
     bool sdrRunning = false;
 #endif
 

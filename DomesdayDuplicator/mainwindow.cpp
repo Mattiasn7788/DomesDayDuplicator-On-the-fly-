@@ -1676,18 +1676,30 @@ void MainWindow::StartSdrCapture(const std::filesystem::path& rfFilePath)
         " --system " + system +
         " --gain " + gain;
 
+    // Pipe for stdin — keeps the script's "Press Enter to quit" blocking until we close it
+    int pipefd[2] = {-1, -1};
+    pipe(pipefd);
+
     pid_t pid = fork();
     if (pid == 0) {
         FILE* logf = fopen("/tmp/ddd_sdr.log", "w");
         if (logf) { int lfd = fileno(logf); dup2(lfd, STDOUT_FILENO); dup2(lfd, STDERR_FILENO); fclose(logf); }
 
+        dup2(pipefd[0], STDIN_FILENO);
+        ::close(pipefd[0]);
+        ::close(pipefd[1]);
+
         execl("/bin/bash", "/bin/bash", "-c", bashCmd.c_str(), nullptr);
         _exit(1);
     } else if (pid > 0) {
-        sdrPid     = pid;
-        sdrRunning = true;
+        ::close(pipefd[0]);
+        sdrPid      = pid;
+        sdrStdinFd  = pipefd[1];
+        sdrRunning  = true;
         qDebug() << "MainWindow::StartSdrCapture(): Started GNURadio, pid=" << pid;
     } else {
+        ::close(pipefd[0]);
+        ::close(pipefd[1]);
         sdrRunning = false;
         qDebug() << "MainWindow::StartSdrCapture(): fork() failed";
     }
@@ -1697,8 +1709,14 @@ void MainWindow::StopSdrCapture()
 {
     if (!sdrRunning || sdrPid <= 0) return;
 
-    kill(sdrPid, SIGTERM);
-    for (int i = 0; i < 30; i++) {
+    // Close stdin pipe — sends EOF which satisfies "Press Enter to quit" in the script
+    if (sdrStdinFd >= 0) {
+        ::close(sdrStdinFd);
+        sdrStdinFd = -1;
+    }
+
+    // Wait up to 5 seconds for clean exit, then force kill
+    for (int i = 0; i < 50; i++) {
         int status;
         if (waitpid(sdrPid, &status, WNOHANG) == sdrPid) break;
         usleep(100000);
