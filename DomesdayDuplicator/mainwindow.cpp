@@ -1662,17 +1662,26 @@ void MainWindow::StartSdrCapture(const std::filesystem::path& rfFilePath)
     std::string gain       = std::to_string(configuration->getSdrGain());
     std::string outputStr  = outputBase.string();
 
+    // Derive conda root from python path (e.g. ~/radioconda/bin/python -> ~/radioconda)
+    std::string condaRoot = std::filesystem::path(pythonExe).parent_path().parent_path().string();
+
+    // Run via bash activating conda so SoapySDR plugin paths are set up correctly.
+    // Mirrors the Windows approach: cmd /C activate.bat && python script.py
+    std::string bashCmd =
+        "source \"" + condaRoot + "/etc/profile.d/conda.sh\" 2>/dev/null; "
+        "conda activate base 2>/dev/null; "
+        "exec \"" + pythonExe + "\""
+        " \"" + scriptPath + "\""
+        " --output \"" + outputStr + "\""
+        " --system " + system +
+        " --gain " + gain;
+
     pid_t pid = fork();
     if (pid == 0) {
         FILE* logf = fopen("/tmp/ddd_sdr.log", "w");
         if (logf) { int lfd = fileno(logf); dup2(lfd, STDOUT_FILENO); dup2(lfd, STDERR_FILENO); fclose(logf); }
 
-        execlp(pythonExe.c_str(), pythonExe.c_str(),
-               scriptPath.c_str(),
-               "--output", outputStr.c_str(),
-               "--system", system.c_str(),
-               "--gain",   gain.c_str(),
-               nullptr);
+        execl("/bin/bash", "/bin/bash", "-c", bashCmd.c_str(), nullptr);
         _exit(1);
     } else if (pid > 0) {
         sdrPid     = pid;
