@@ -165,6 +165,8 @@ private:
     pid_t fmediaPid = -1;
     int fmediaStdinFd = -1;  // write end of pipe connected to fmedia's stdin
     bool fmediaRunning = false;
+    pid_t sdrPid = -1;
+    bool sdrRunning = false;
 #endif
 
     bool isPlayerConnected = false;

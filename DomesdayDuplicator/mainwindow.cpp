@@ -1648,8 +1648,59 @@ void MainWindow::StopAudioCapture()
     qDebug() << "MainWindow::StopAudioCapture(): fmedia stopped";
 }
 
-void MainWindow::StartSdrCapture(const std::filesystem::path&) {}
-void MainWindow::StopSdrCapture() {}
+void MainWindow::StartSdrCapture(const std::filesystem::path& rfFilePath)
+{
+    std::filesystem::path outputBase = rfFilePath.parent_path() / (rfFilePath.stem().string() + "_hifi");
+
+    QString configuredPython = configuration->getSdrPythonPath().trimmed();
+    std::string pythonExe = configuredPython.isEmpty()
+        ? (std::string(getenv("HOME") ? getenv("HOME") : "") + "/radioconda/bin/python")
+        : configuredPython.toStdString();
+
+    std::string scriptPath = configuration->getSdrScriptPath().toStdString();
+    std::string system     = configuration->getSdrSystem().toStdString();
+    std::string gain       = std::to_string(configuration->getSdrGain());
+    std::string outputStr  = outputBase.string();
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        FILE* logf = fopen("/tmp/ddd_sdr.log", "w");
+        if (logf) { int lfd = fileno(logf); dup2(lfd, STDOUT_FILENO); dup2(lfd, STDERR_FILENO); fclose(logf); }
+
+        execlp(pythonExe.c_str(), pythonExe.c_str(),
+               scriptPath.c_str(),
+               "--output", outputStr.c_str(),
+               "--system", system.c_str(),
+               "--gain",   gain.c_str(),
+               nullptr);
+        _exit(1);
+    } else if (pid > 0) {
+        sdrPid     = pid;
+        sdrRunning = true;
+        qDebug() << "MainWindow::StartSdrCapture(): Started GNURadio, pid=" << pid;
+    } else {
+        sdrRunning = false;
+        qDebug() << "MainWindow::StartSdrCapture(): fork() failed";
+    }
+}
+
+void MainWindow::StopSdrCapture()
+{
+    if (!sdrRunning || sdrPid <= 0) return;
+
+    kill(sdrPid, SIGTERM);
+    for (int i = 0; i < 30; i++) {
+        int status;
+        if (waitpid(sdrPid, &status, WNOHANG) == sdrPid) break;
+        usleep(100000);
+    }
+    kill(sdrPid, SIGKILL);
+    waitpid(sdrPid, nullptr, WNOHANG);
+
+    sdrPid     = -1;
+    sdrRunning = false;
+    qDebug() << "MainWindow::StopSdrCapture(): GNURadio stopped";
+}
 #endif
 
 // Main window - capture button clicked
