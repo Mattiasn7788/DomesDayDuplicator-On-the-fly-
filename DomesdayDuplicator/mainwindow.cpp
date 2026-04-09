@@ -235,13 +235,17 @@ void MainWindow::configurationChangedSignalHandler()
     // Update amplitude UI
     updateAmplitudeUI();
 
-    // Show/hide SDR overflow counter based on whether SDR HiFi is enabled
+    // Show/hide SDR overflow counter based on whether SDR HiFi is enabled.
+    // QGridLayout retains row space for hidden widgets, so we also set maximumHeight(0)
+    // when hiding to collapse the rows and avoid pushing other UI elements out of place.
     bool sdrEnabled = configuration->getSdrEnabled();
-    ui->sdrOverrunsPreLabel->setVisible(sdrEnabled);
-    ui->sdrOverrunsLabel->setVisible(sdrEnabled);
-    ui->sdrUnderrunsPreLabel->setVisible(sdrEnabled);
-    ui->sdrUnderrunsLabel->setVisible(sdrEnabled);
-    ui->sdrResetCountersButton->setVisible(sdrEnabled);
+    int maxH = sdrEnabled ? QWIDGETSIZE_MAX : 0;
+    for (QWidget* w : {(QWidget*)ui->sdrOverrunsPreLabel, (QWidget*)ui->sdrOverrunsLabel,
+                       (QWidget*)ui->sdrUnderrunsPreLabel, (QWidget*)ui->sdrUnderrunsLabel,
+                       (QWidget*)ui->sdrResetCountersButton}) {
+        w->setVisible(sdrEnabled);
+        w->setMaximumHeight(maxH);
+    }
 
     // Update theme if theme setting changed
     applyTheme();

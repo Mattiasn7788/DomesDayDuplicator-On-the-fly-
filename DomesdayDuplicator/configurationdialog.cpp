@@ -110,9 +110,13 @@ ConfigurationDialog::ConfigurationDialog(QWidget *parent) :
     // Build the SDR HiFi tab programmatically
     buildSdrTab();
 
-    // Let the dialog size itself based on content — fixes layout issues on macOS
-    // where native controls are taller than on Windows/Linux.
-    adjustSize();
+#ifdef __APPLE__
+    // macOS native controls (QLineEdit, QComboBox, QPushButton) have a larger natural
+    // height than on Windows/Linux. The dialog's fixed geometry from the .ui file is
+    // too short, causing the layout to distribute leftover space to input rows.
+    setMinimumHeight(390);
+    resize(width(), 420);
+#endif
 }
 
 ConfigurationDialog::~ConfigurationDialog()
