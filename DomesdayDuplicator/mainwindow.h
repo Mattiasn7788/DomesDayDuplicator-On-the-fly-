@@ -30,6 +30,9 @@
 #include <QDate>
 #include <QTimer>
 #include <QMessageBox>
+#if defined(__APPLE__) || defined(__linux__)
+#include <QSocketNotifier>
+#endif
 #include "aboutdialog.h"
 #include "configurationdialog.h"
 #include "configuration.h"
@@ -97,6 +100,10 @@ private slots:
     void on_actionAutomatic_capture_triggered();
     void on_limitDurationCheckBox_stateChanged(int arg1);
     void on_actionAdvanced_naming_triggered();
+    void on_sdrResetCountersButton_clicked();
+#if defined(__APPLE__) || defined(__linux__)
+    void onSdrOutput();
+#endif
 
 private:
     struct AmplitudeRecord
@@ -161,14 +168,19 @@ private:
     PROCESS_INFORMATION sdrProcessInfo = {};
     bool sdrRunning = false;
     HANDLE sdrJobHandle = nullptr;
+    HANDLE sdrStdoutReadHandle = nullptr;
 #elif defined(__APPLE__) || defined(__linux__)
     pid_t fmediaPid = -1;
     int fmediaStdinFd = -1;  // write end of pipe connected to fmedia's stdin
     bool fmediaRunning = false;
     pid_t sdrPid = -1;
     int sdrStdinFd = -1;
+    int sdrStdoutReadFd = -1;
     bool sdrRunning = false;
+    QSocketNotifier* sdrOutputNotifier = nullptr;
 #endif
+    int sdrOverrunCount = 0;
+    int sdrUnderrunCount = 0;
 
     bool isPlayerConnected = false;
     bool usbDevicePresentLastCheck = false;

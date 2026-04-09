@@ -234,7 +234,15 @@ void MainWindow::configurationChangedSignalHandler()
 
     // Update amplitude UI
     updateAmplitudeUI();
-    
+
+    // Show/hide SDR overflow counter based on whether SDR HiFi is enabled
+    bool sdrEnabled = configuration->getSdrEnabled();
+    ui->sdrOverrunsPreLabel->setVisible(sdrEnabled);
+    ui->sdrOverrunsLabel->setVisible(sdrEnabled);
+    ui->sdrUnderrunsPreLabel->setVisible(sdrEnabled);
+    ui->sdrUnderrunsLabel->setVisible(sdrEnabled);
+    ui->sdrResetCountersButton->setVisible(sdrEnabled);
+
     // Update theme if theme setting changed
     applyTheme();
 }
@@ -491,6 +499,25 @@ void MainWindow::updateCaptureStatus()
     size_t mbWritten = usbDevice->GetFileSizeWrittenInBytes() / (1024 * 1024);
     ui->dataCapturedLabel->setText(QString::number(mbWritten) + (tr(" MiB")));
     ui->numberOfTransfersLabel->setText(QString::number(usbDevice->GetNumberOfTransfers()));
+
+#ifdef _WIN32
+    // Poll GNURadio stdout pipe for O/U overflow characters
+    if (sdrRunning && sdrStdoutReadHandle) {
+        DWORD available = 0;
+        if (PeekNamedPipe(sdrStdoutReadHandle, nullptr, 0, nullptr, &available, nullptr) && available > 0) {
+            char buf[512];
+            DWORD read = 0;
+            if (ReadFile(sdrStdoutReadHandle, buf, min((DWORD)sizeof(buf), available), &read, nullptr) && read > 0) {
+                for (DWORD i = 0; i < read; i++) {
+                    if (buf[i] == 'O') sdrOverrunCount++;
+                    else if (buf[i] == 'U') sdrUnderrunCount++;
+                }
+                ui->sdrOverrunsLabel->setText(QString::number(sdrOverrunCount));
+                ui->sdrUnderrunsLabel->setText(QString::number(sdrUnderrunCount));
+            }
+        }
+    }
+#endif
 
     // If the capture process was requeted to stop and has now in fact stopped, perform our final tasks for this capture
     // and return the UI state to normal.
@@ -1415,6 +1442,12 @@ void MainWindow::StartCapture()
     // Start SDR HiFi capture if enabled - delayed so USB capture is fully stable
     // before GNURadio's heavy startup competes for CPU/disk
     if (configuration->getSdrEnabled()) {
+        // Reset overflow counters for the new capture
+        sdrOverrunCount  = 0;
+        sdrUnderrunCount = 0;
+        ui->sdrOverrunsLabel->setText("0");
+        ui->sdrUnderrunsLabel->setText("0");
+
         int delayMs = configuration->getSdrStartDelayMs();
         QTimer::singleShot(delayMs, this, [this]() {
             if (isCaptureRunning) StartSdrCapture(captureFilePath);
@@ -1515,19 +1548,33 @@ void MainWindow::StartSdrCapture(const std::filesystem::path& rfFilePath)
         L" --system " + systemW +
         L" --gain " + std::to_wstring(gain) + L"\"";
 
+    // Stdout pipe to read O/U characters for the overflow counter
+    SECURITY_ATTRIBUTES sa = {};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    HANDLE hStdoutRead = nullptr, hStdoutWrite = nullptr;
+    CreatePipe(&hStdoutRead, &hStdoutWrite, &sa, 0);
+    SetHandleInformation(hStdoutRead, HANDLE_FLAG_INHERIT, 0); // read end not inherited by child
+
     STARTUPINFOW si = {};
     si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES;
     si.wShowWindow = SW_HIDE;
+    si.hStdOutput = hStdoutWrite;
+    si.hStdError  = hStdoutWrite;
+    si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
 
     ZeroMemory(&sdrProcessInfo, sizeof(sdrProcessInfo));
 
     std::vector<wchar_t> cmdBuf(cmdLine.begin(), cmdLine.end());
     cmdBuf.push_back(L'\0');
 
-    if (CreateProcessW(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE,
+    if (CreateProcessW(nullptr, cmdBuf.data(), nullptr, nullptr, TRUE,
                        CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
                        nullptr, nullptr, &si, &sdrProcessInfo)) {
+        CloseHandle(hStdoutWrite); // parent doesn't write
+        sdrStdoutReadHandle = hStdoutRead;
+
         // Assign to a Job Object so the entire process tree (cmd + python) is killed together
         sdrJobHandle = CreateJobObject(nullptr, nullptr);
         if (sdrJobHandle) {
@@ -1539,6 +1586,8 @@ void MainWindow::StartSdrCapture(const std::filesystem::path& rfFilePath)
         sdrRunning = true;
         qDebug() << "MainWindow::StartSdrCapture(): Started GNURadio, pid=" << sdrProcessInfo.dwProcessId;
     } else {
+        CloseHandle(hStdoutWrite);
+        CloseHandle(hStdoutRead);
         sdrRunning = false;
         qDebug() << "MainWindow::StartSdrCapture(): Failed to start GNURadio, error=" << GetLastError();
     }
@@ -1561,6 +1610,7 @@ void MainWindow::StopSdrCapture()
     CloseHandle(sdrProcessInfo.hProcess);
     CloseHandle(sdrProcessInfo.hThread);
     ZeroMemory(&sdrProcessInfo, sizeof(sdrProcessInfo));
+    if (sdrStdoutReadHandle) { CloseHandle(sdrStdoutReadHandle); sdrStdoutReadHandle = nullptr; }
     sdrRunning = false;
     qDebug() << "MainWindow::StopSdrCapture(): GNURadio stopped";
 }
@@ -1676,30 +1726,38 @@ void MainWindow::StartSdrCapture(const std::filesystem::path& rfFilePath)
         " --system " + system +
         " --gain " + gain;
 
-    // Pipe for stdin — keeps the script's "Press Enter to quit" blocking until we close it
-    int pipefd[2] = {-1, -1};
-    pipe(pipefd);
+    // stdin pipe — keeps "Press Enter to quit" blocking until we close it
+    int stdinPipe[2]  = {-1, -1};
+    // stdout pipe — read O/U characters for the overflow counter
+    int stdoutPipe[2] = {-1, -1};
+    pipe(stdinPipe);
+    pipe(stdoutPipe);
 
     pid_t pid = fork();
     if (pid == 0) {
-        FILE* logf = fopen("/tmp/ddd_sdr.log", "w");
-        if (logf) { int lfd = fileno(logf); dup2(lfd, STDOUT_FILENO); dup2(lfd, STDERR_FILENO); fclose(logf); }
-
-        dup2(pipefd[0], STDIN_FILENO);
-        ::close(pipefd[0]);
-        ::close(pipefd[1]);
+        dup2(stdinPipe[0],  STDIN_FILENO);
+        dup2(stdoutPipe[1], STDOUT_FILENO);
+        dup2(stdoutPipe[1], STDERR_FILENO);
+        ::close(stdinPipe[0]);  ::close(stdinPipe[1]);
+        ::close(stdoutPipe[0]); ::close(stdoutPipe[1]);
 
         execl("/bin/bash", "/bin/bash", "-c", bashCmd.c_str(), nullptr);
         _exit(1);
     } else if (pid > 0) {
-        ::close(pipefd[0]);
-        sdrPid      = pid;
-        sdrStdinFd  = pipefd[1];
-        sdrRunning  = true;
+        ::close(stdinPipe[0]);
+        ::close(stdoutPipe[1]);
+        sdrPid           = pid;
+        sdrStdinFd       = stdinPipe[1];
+        sdrStdoutReadFd  = stdoutPipe[0];
+        sdrRunning       = true;
+
+        sdrOutputNotifier = new QSocketNotifier(sdrStdoutReadFd, QSocketNotifier::Read, this);
+        connect(sdrOutputNotifier, &QSocketNotifier::activated, this, &MainWindow::onSdrOutput);
+
         qDebug() << "MainWindow::StartSdrCapture(): Started GNURadio, pid=" << pid;
     } else {
-        ::close(pipefd[0]);
-        ::close(pipefd[1]);
+        ::close(stdinPipe[0]);  ::close(stdinPipe[1]);
+        ::close(stdoutPipe[0]); ::close(stdoutPipe[1]);
         sdrRunning = false;
         qDebug() << "MainWindow::StartSdrCapture(): fork() failed";
     }
@@ -1709,11 +1767,8 @@ void MainWindow::StopSdrCapture()
 {
     if (!sdrRunning || sdrPid <= 0) return;
 
-    // Close stdin pipe — sends EOF which satisfies "Press Enter to quit" in the script
-    if (sdrStdinFd >= 0) {
-        ::close(sdrStdinFd);
-        sdrStdinFd = -1;
-    }
+    // Close stdin pipe — EOF satisfies "Press Enter to quit" in the script
+    if (sdrStdinFd >= 0) { ::close(sdrStdinFd); sdrStdinFd = -1; }
 
     // Wait up to 5 seconds for clean exit, then force kill
     for (int i = 0; i < 50; i++) {
@@ -1724,9 +1779,25 @@ void MainWindow::StopSdrCapture()
     kill(sdrPid, SIGKILL);
     waitpid(sdrPid, nullptr, WNOHANG);
 
+    if (sdrOutputNotifier) { delete sdrOutputNotifier; sdrOutputNotifier = nullptr; }
+    if (sdrStdoutReadFd >= 0) { ::close(sdrStdoutReadFd); sdrStdoutReadFd = -1; }
+
     sdrPid     = -1;
     sdrRunning = false;
     qDebug() << "MainWindow::StopSdrCapture(): GNURadio stopped";
+}
+
+void MainWindow::onSdrOutput()
+{
+    char buf[512];
+    ssize_t n = read(sdrStdoutReadFd, buf, sizeof(buf));
+    if (n <= 0) return;
+    for (ssize_t i = 0; i < n; i++) {
+        if (buf[i] == 'O') sdrOverrunCount++;
+        else if (buf[i] == 'U') sdrUnderrunCount++;
+    }
+    ui->sdrOverrunsLabel->setText(QString::number(sdrOverrunCount));
+    ui->sdrUnderrunsLabel->setText(QString::number(sdrUnderrunCount));
 }
 #endif
 
@@ -1744,6 +1815,14 @@ void MainWindow::on_capturePushButton_clicked()
 }
 
 // Limit duration checkbox state changed
+void MainWindow::on_sdrResetCountersButton_clicked()
+{
+    sdrOverrunCount  = 0;
+    sdrUnderrunCount = 0;
+    ui->sdrOverrunsLabel->setText("0");
+    ui->sdrUnderrunsLabel->setText("0");
+}
+
 void MainWindow::on_limitDurationCheckBox_stateChanged(int arg1)
 {
     (void)arg1;
