@@ -15,9 +15,6 @@ env:
 jobs:
   build-windows:
     runs-on: windows-latest
-    # Only run on releases (tags) or manual workflow_dispatch.
-    # Skip on regular branch pushes to avoid wasting build minutes while iterating on macOS.
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     permissions:
       contents: write
 
