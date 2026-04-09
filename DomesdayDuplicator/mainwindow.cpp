@@ -511,7 +511,7 @@ void MainWindow::updateCaptureStatus()
         if (PeekNamedPipe(sdrStdoutReadHandle, nullptr, 0, nullptr, &available, nullptr) && available > 0) {
             char buf[512];
             DWORD read = 0;
-            if (ReadFile(sdrStdoutReadHandle, buf, min((DWORD)sizeof(buf), available), &read, nullptr) && read > 0) {
+            if (ReadFile(sdrStdoutReadHandle, buf, std::min((DWORD)sizeof(buf), available), &read, nullptr) && read > 0) {
                 for (DWORD i = 0; i < read; i++) {
                     if (buf[i] == 'O') sdrOverrunCount++;
                     else if (buf[i] == 'U') sdrUnderrunCount++;
