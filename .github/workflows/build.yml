@@ -165,21 +165,21 @@ jobs:
         run: |
           brew install cmake libusb flac brotli webp libsoxr
           # Note: ffmpeg is NOT installed from Homebrew — Homebrew's ffmpeg targets macOS 14.
-          # We build it from source with deployment target 10.15 below.
+          # We build it from source with deployment target 11.0 below.
 
       - name: Cache ffmpeg (macOS 11 compatible)
         uses: actions/cache@v4
         id: ffmpeg-cache
         with:
           path: ~/ffmpeg-compat
-          key: ffmpeg-7.1-macos1015-x86_64-v1
+          key: ffmpeg-7.1-macos11-x86_64-v3
 
       - name: Build ffmpeg 7.1 with macOS 11 deployment target
         if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
         run: |
           git clone --depth 1 --branch n7.1 https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg-src
           cd /tmp/ffmpeg-src
-          export MACOSX_DEPLOYMENT_TARGET=10.15
+          export MACOSX_DEPLOYMENT_TARGET=11.0
           # Build shared libs (libavutil + libswresample) for our C++ app to link against,
           # plus avcodec/avformat/avfilter and the ffmpeg binary for on-the-fly FLAC capture.
           # --enable-libsoxr gives high-quality resampling via resampler=soxr in the pipeline.
@@ -198,8 +198,8 @@ jobs:
             --disable-muxers   --enable-muxer=pcm_u8 \
             --disable-filters  --enable-filter=aresample \
             --enable-libsoxr \
-            --extra-cflags="-mmacosx-version-min=10.15 -I$(brew --prefix libsoxr)/include" \
-            --extra-ldflags="-mmacosx-version-min=10.15 -L$(brew --prefix libsoxr)/lib" \
+            --extra-cflags="-mmacosx-version-min=11.0 -I$(brew --prefix libsoxr)/include" \
+            --extra-ldflags="-mmacosx-version-min=11.0 -L$(brew --prefix libsoxr)/lib" \
             --disable-x86asm
           make -j$(sysctl -n hw.logicalcpu)
           make install
@@ -226,7 +226,7 @@ jobs:
 
           cmake .. -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_PREFIX_PATH="$QT_ROOT" \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=10.15
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
 
           make -j$(sysctl -n hw.logicalcpu)
 
