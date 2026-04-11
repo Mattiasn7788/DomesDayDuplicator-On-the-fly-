@@ -125,6 +125,18 @@ MainWindow::MainWindow(const ILogger& log, QWidget* parent) :
     amplitudeTimer.reset(new QTimer(this));
     updateAmplitudeUI();
 
+    // Initialize SDR counter visibility from saved configuration (mirrors configurationChangedSignalHandler)
+    {
+        bool sdrEnabled = configuration->getSdrEnabled();
+        int maxH = sdrEnabled ? QWIDGETSIZE_MAX : 0;
+        for (QWidget* w : {(QWidget*)ui->sdrOverrunsPreLabel, (QWidget*)ui->sdrOverrunsLabel,
+                           (QWidget*)ui->sdrUnderrunsPreLabel, (QWidget*)ui->sdrUnderrunsLabel,
+                           (QWidget*)ui->sdrResetCountersButton}) {
+            w->setVisible(sdrEnabled);
+            w->setMaximumHeight(maxH);
+        }
+    }
+
     // Set up the Domesday Duplicator USB device and connect the signal handlers
 #ifdef _WIN32
     if (configuration->getUseWinUsb())
