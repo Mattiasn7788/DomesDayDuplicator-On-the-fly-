@@ -22,7 +22,10 @@ if(WIN32)
 endif()
 
 if(APPLE)
-    list(APPEND DomesdayDuplicator_SOURCES macos_permissions.mm)
+    set(MACOSX_BUNDLE_ICON_FILE AppIcon)
+    set(APP_ICON_MACOS "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/ApplicationIcon/AppIcon.icns")
+    set_source_files_properties("${APP_ICON_MACOS}" PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
+    list(APPEND DomesdayDuplicator_SOURCES macos_permissions.mm "${APP_ICON_MACOS}")
 endif()
 
 qt_add_resources(DomesdayDuplicator_SOURCES resources.qrc)
@@ -35,6 +38,7 @@ if(APPLE)
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/MacOSXBundleInfo.plist.in"
         MACOSX_BUNDLE_GUI_IDENTIFIER "com.domesdayduplicator.app"
         MACOSX_BUNDLE_BUNDLE_NAME "DomesdayDuplicator"
+        MACOSX_BUNDLE_ICON_FILE "AppIcon"
     )
     target_link_libraries(DomesdayDuplicator PRIVATE "-framework AVFoundation")
 endif()
