@@ -1964,9 +1964,9 @@ void MainWindow::applyTheme()
         useDarkTheme = isSystemDarkTheme();
     }
     
+    qApp->setStyle(QStyleFactory::create("Fusion"));
+
     if (useDarkTheme) {
-        // Apply dark theme
-        qApp->setStyle("Fusion");
         QPalette darkPalette;
         darkPalette.setColor(QPalette::Window, QColor(53, 53, 53));
         darkPalette.setColor(QPalette::WindowText, Qt::white);
@@ -1983,9 +1983,30 @@ void MainWindow::applyTheme()
         darkPalette.setColor(QPalette::HighlightedText, Qt::black);
         qApp->setPalette(darkPalette);
     } else {
-        // Apply light theme
-        qApp->setStyle("Fusion");
-        qApp->setPalette(qApp->style()->standardPalette());
+        // Explicitly define light palette — don't use standardPalette() which
+        // can return a dark palette on systems running in system dark mode.
+        QPalette lightPalette;
+        lightPalette.setColor(QPalette::Window, QColor(240, 240, 240));
+        lightPalette.setColor(QPalette::WindowText, Qt::black);
+        lightPalette.setColor(QPalette::Base, Qt::white);
+        lightPalette.setColor(QPalette::AlternateBase, QColor(245, 245, 245));
+        lightPalette.setColor(QPalette::ToolTipBase, Qt::white);
+        lightPalette.setColor(QPalette::ToolTipText, Qt::black);
+        lightPalette.setColor(QPalette::Text, Qt::black);
+        lightPalette.setColor(QPalette::Button, QColor(240, 240, 240));
+        lightPalette.setColor(QPalette::ButtonText, Qt::black);
+        lightPalette.setColor(QPalette::BrightText, Qt::red);
+        lightPalette.setColor(QPalette::Link, QColor(0, 0, 255));
+        lightPalette.setColor(QPalette::Highlight, QColor(0, 120, 215));
+        lightPalette.setColor(QPalette::HighlightedText, Qt::white);
+        qApp->setPalette(lightPalette);
+    }
+
+    // Force all top-level widgets to repaint with the new style/palette
+    for (QWidget* w : qApp->topLevelWidgets()) {
+        w->style()->unpolish(w);
+        w->style()->polish(w);
+        w->update();
     }
 }
 
