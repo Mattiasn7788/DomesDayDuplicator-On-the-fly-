@@ -18,7 +18,7 @@ set(DomesdayDuplicator_SOURCES
 )
 
 if(WIN32)
-    list(APPEND DomesdayDuplicator_SOURCES UsbDeviceWinUsb.cpp)
+    list(APPEND DomesdayDuplicator_SOURCES UsbDeviceWinUsb.cpp resources.rc)
 endif()
 
 if(APPLE)
