@@ -139,7 +139,16 @@ jobs:
           prerelease: false
           generate_release_notes: true
           body: |
-            **Known issue:** The SDR HiFi tab output path does not support non-ASCII characters (å, ä, ö etc.) on Windows. Use a path with only ASCII characters until this is fixed.
+            ## Downloads
+            - **Windows:** `DomesdayDuplicator_Flac+DownSampling.zip`
+            - **macOS (Intel, Big Sur 11.0+):** `DomesdayDuplicator_macOS.dmg`
+
+            ## Required software
+            - **fmedia** (audio capture): https://www.videohelp.com/software/fmedia
+            - **radioconda / GNU Radio** (SDR HiFi capture): https://github.com/radioconda/radioconda-installer
+
+            ## Known issue
+            The SDR HiFi tab output path does not support non-ASCII characters (å, ä, ö etc.) on Windows. Use a path with only ASCII characters until this is fixed.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -335,9 +344,13 @@ jobs:
           codesign --force --sign - "$APP_MACOS/flac"   2>/dev/null || true
           codesign --force --deep --sign - DomesdayDuplicator/DomesdayDuplicator.app 2>/dev/null || true
 
-          # Build the DMG from the signed app bundle
+          # Stage app + GNURadio scripts together, then build DMG
+          mkdir -p dmg_staging
+          cp -r DomesdayDuplicator/DomesdayDuplicator.app dmg_staging/
+          cp -r ../GNURadio-Scripts dmg_staging/GNURadio-Scripts
+
           hdiutil create -volname DomesdayDuplicator \
-            -srcfolder DomesdayDuplicator/DomesdayDuplicator.app \
+            -srcfolder dmg_staging \
             -ov -format UDZO ../DomesdayDuplicator_macOS.dmg
 
           echo "=== FINAL CONTENTS ==="
@@ -358,6 +371,5 @@ jobs:
           name: DomesdayDuplicator_Flac+DownSampling ${{ github.ref_name }}
           draft: false
           prerelease: false
-          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
