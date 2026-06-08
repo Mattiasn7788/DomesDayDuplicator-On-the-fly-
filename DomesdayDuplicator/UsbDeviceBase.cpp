@@ -306,6 +306,107 @@ bool UsbDeviceBase::StartCapture(const std::filesystem::path& filePath, CaptureF
         });
 #endif
     }
+    else if (format == CaptureFormat::Unsigned10BitFlacOnTheFly)
+    {
+        // Open an on-the-fly pipe: s16le → flac --bps=16 (direct, no ffmpeg).
+        // Resampling for 20/10 MSPS is done in ConvertRawSampleData using AudioResampler.
+        // sample-rate stored in kHz convention (40000 = 40 MSPS) to match ld-decode expectations.
+        int level = (flacCompressionLevel >= 0 && flacCompressionLevel <= 8) ? flacCompressionLevel : 8;
+        int flacSampleRate = flacOutputSampleRateInHz / 1000;  // kHz convention for FLAC header
+        flac16TargetSampleRateInHz = flacOutputSampleRateInHz;
+
+#ifdef _WIN32
+        captureOutputFile.clear();
+        captureOutputFile.open(filePath, std::ios::out | std::ios::trunc | std::ios::binary);
+        if (!captureOutputFile.is_open())
+        {
+            Log().Error("StartCapture(): Failed to create the 16-bit FLAC output file at path {0}", filePath);
+            captureResult = TransferResult::FileCreationError;
+            return false;
+        }
+        {
+            std::wstring flacCmdW = L"flac";
+            wchar_t wExePath[MAX_PATH] = {};
+            GetModuleFileNameW(NULL, wExePath, MAX_PATH);
+            std::wstring exeDirW(wExePath);
+            auto lastSlash = exeDirW.find_last_of(L"\\/");
+            exeDirW = (lastSlash != std::wstring::npos) ? exeDirW.substr(0, lastSlash + 1) : L"";
+            if (std::filesystem::exists(exeDirW + L"flac.exe")) flacCmdW = L"\"" + exeDirW + L"flac.exe\"";
+
+            std::wstring cmd = flacCmdW + L" -" + std::to_wstring(level)
+                + L" --bps=16 --sign=signed --channels=1 --endian=little "
+                + L"--sample-rate=" + std::to_wstring(flacSampleRate) + L" "
+                + L"--no-seektable --force-raw-format -f -c -";
+            Log().Info(std::wstring(L"StartCapture(): 16-bit FLAC pipe command: ") + cmd);
+            flacPipeHandle = openPipeNoWindow(cmd, flacPipeProcess, flacReadPipeHandle);
+            if (flacPipeHandle != nullptr)
+                flacStdinWriteHandle = reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(flacPipeHandle)));
+        }
+#else
+        {
+            std::string flacCmd = "flac";
+#ifdef __APPLE__
+            {
+                char execPath[4096] = {};
+                uint32_t pathSize = sizeof(execPath);
+                if (_NSGetExecutablePath(execPath, &pathSize) == 0)
+                {
+                    std::filesystem::path execDir = std::filesystem::path(execPath).parent_path();
+                    if (std::filesystem::exists(execDir / "flac")) flacCmd = "\"" + (execDir / "flac").string() + "\"";
+                }
+            }
+#endif
+            std::string quotedOutputPath = "'";
+            for (char c : filePath.string()) {
+                if (c == '\'') quotedOutputPath += "'\\''";
+                else           quotedOutputPath += c;
+            }
+            quotedOutputPath += "'";
+
+            std::string cmd = flacCmd + " -" + std::to_string(level)
+                + " --bps=16 --sign=signed --channels=1 --endian=little "
+                + "--sample-rate=" + std::to_string(flacSampleRate) + " "
+                + "--no-seektable --force-raw-format -f - -o " + quotedOutputPath
+                + " 2>/tmp/ddd_flac16_err.log";
+            Log().Info(std::string("StartCapture(): 16-bit FLAC pipe command: ") + cmd);
+            flacPipeHandle = popen(cmd.c_str(), "w");
+        }
+#endif
+        if (flacPipeHandle == nullptr)
+        {
+            Log().Error("StartCapture(): Failed to open 10-bit FLAC pipe");
+#ifdef _WIN32
+            captureOutputFile.close();
+#endif
+            captureResult = TransferResult::FileCreationError;
+            return false;
+        }
+
+#ifdef _WIN32
+        flacReaderThread = std::thread([this]() {
+            try
+            {
+                const DWORD bufSize = 65536;
+                std::vector<char> buf(bufSize);
+                DWORD bytesRead;
+                while (ReadFile(flacReadPipeHandle, buf.data(), bufSize, &bytesRead, NULL) && bytesRead > 0)
+                {
+                    captureOutputFile.write(buf.data(), static_cast<std::streamsize>(bytesRead));
+                    transferFileSizeWrittenInBytes += bytesRead;
+                }
+                captureOutputFile.flush();
+            }
+            catch (const std::exception& e)
+            {
+                Log().Error("flacReaderThread (10-bit): Unhandled exception: {0}", e.what());
+            }
+            catch (...)
+            {
+                Log().Error("flacReaderThread (10-bit): Unknown unhandled exception");
+            }
+        });
+#endif
+    }
     else
     {
 #ifdef _WIN32
@@ -447,7 +548,8 @@ void UsbDeviceBase::StopCapture()
     diskBufferEntries.reset();
 
     // Close the output file or pipe
-    if (captureFormat == CaptureFormat::Signed16BitFlacOnTheFly)
+    if (captureFormat == CaptureFormat::Signed16BitFlacOnTheFly
+        || captureFormat == CaptureFormat::Unsigned10BitFlacOnTheFly)
     {
         if (flacPipeHandle != nullptr)
         {
@@ -558,6 +660,10 @@ void UsbDeviceBase::CaptureThread()
         break;
     case CaptureFormat::Signed16BitFlacOnTheFly:
         // Full s16le at 40MSPS is piped to ffmpeg which handles downsampling
+        requiredConversionBufferSize = diskBufferSizeInBytes;
+        break;
+    case CaptureFormat::Unsigned10BitFlacOnTheFly:
+        // s16le output, possibly resampled down. Allocate full size; ConvertRawSampleData resizes on output.
         requiredConversionBufferSize = diskBufferSizeInBytes;
         break;
     }
@@ -1004,7 +1110,8 @@ void UsbDeviceBase::ProcessingThread()
             }
 
             // Write the converted data to the pipe or output file
-            if (captureFormat == CaptureFormat::Signed16BitFlacOnTheFly)
+            if (captureFormat == CaptureFormat::Signed16BitFlacOnTheFly
+                || captureFormat == CaptureFormat::Unsigned10BitFlacOnTheFly)
             {
 #ifdef _WIN32
                 // Write raw s16le data to the ffmpeg+flac pipe using WriteFile directly.
@@ -1136,7 +1243,8 @@ void UsbDeviceBase::ProcessingThread()
 
         // If we're using overlapped file IO, complete the previously submitted write operation.
 #ifdef _WIN32
-        if (useWindowsOverlappedFileIo && captureFormat != CaptureFormat::Signed16BitFlacOnTheFly)
+        if (useWindowsOverlappedFileIo && captureFormat != CaptureFormat::Signed16BitFlacOnTheFly
+            && captureFormat != CaptureFormat::Unsigned10BitFlacOnTheFly)
         {
             // Retrive the previous disk buffer entry
             size_t lastBufferIndex = (currentDiskBuffer + (totalDiskBufferEntryCount - 1)) % totalDiskBufferEntryCount;
@@ -1433,7 +1541,47 @@ bool UsbDeviceBase::ConvertRawSampleData(size_t diskBufferIndex, CaptureFormat c
 
     // Convert the data to the required format
     uint8_t* writeBufferPointer = outputBuffer.data();
-    if (captureFormat == CaptureFormat::Signed16Bit
+    if (captureFormat == CaptureFormat::Unsigned10BitFlacOnTheFly)
+    {
+        // Convert 10-bit unsigned → signed 16-bit, then optionally resample.
+        // FLAC only supports 8/16/24/32 bps, so we use --bps=16 --sign=signed.
+        size_t sampleCount = readBufferSizeInBytes / 2;
+
+        if (flac16TargetSampleRateInHz >= 40000000)
+        {
+            // 40 MSPS — convert directly, no resampling
+            for (size_t i = 0; i < sampleCount; ++i)
+            {
+                uint16_t orig = (uint16_t)readBufferPointer[0] | ((uint16_t)readBufferPointer[1] << 8);
+                readBufferPointer += 2;
+                uint16_t s = (uint16_t)((int16_t)orig - 0x0200) << 6;
+                writeBufferPointer[0] = (uint8_t)(s & 0x00FF);
+                writeBufferPointer[1] = (uint8_t)((s & 0xFF00) >> 8);
+                writeBufferPointer += 2;
+            }
+        }
+        else
+        {
+            // 20/10 MSPS — simple N:1 decimation (take every Nth sample, no anti-aliasing filter).
+            // AudioResampler at 40 MHz rates produces filter artifacts that compress poorly.
+            // Simple decimation is sufficient here: ld-decode handles all signal processing.
+            int step = 40000000 / flac16TargetSampleRateInHz;  // 2 for 20 MSPS, 4 for 10 MSPS
+            const uint8_t* rp = readBufferPointer;
+            size_t outputCount = 0;
+            for (size_t i = 0; i < sampleCount; i += step, rp += (size_t)step * 2)
+            {
+                uint16_t orig = (uint16_t)rp[0] | ((uint16_t)rp[1] << 8);
+                uint16_t s = (uint16_t)((int16_t)orig - 0x0200) << 6;
+                writeBufferPointer[0] = (uint8_t)(s & 0x00FF);
+                writeBufferPointer[1] = (uint8_t)((s & 0xFF00) >> 8);
+                writeBufferPointer += 2;
+                ++outputCount;
+            }
+            outputBuffer.resize(outputCount * 2);
+        }
+        return true;
+    }
+    else if (captureFormat == CaptureFormat::Signed16Bit
         || captureFormat == CaptureFormat::Signed16BitFlacOnTheFly)
     {
         // Translate the data in the disk buffer to scaled 16-bit signed data

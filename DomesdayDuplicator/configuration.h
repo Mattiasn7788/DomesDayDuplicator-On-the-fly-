@@ -41,11 +41,12 @@ public:
     // Define the possible capture formats
     enum CaptureFormat {
         tenBitPacked,
+        flacDirect16bit,          // 16-bit FLAC on-the-fly (.flac, 40/20/10 MSPS)
         sixteenBitSigned,
         sixteenBitSigned_Half,    // 16-bit 1/2 rate (20 MSPS)
-        sixteenBitSigned_Quarter, // 16-bit 1/4 rate (10 MSPS) 
+        sixteenBitSigned_Quarter, // 16-bit 1/4 rate (10 MSPS)
         ldfCompressed,            // FLAC compressed with .ldf extension (ld-compress compatible)
-        flacDirect                // Direct FLAC output with .flac extension
+        flacDirect                // 8-bit FLAC via ffmpeg+flac (.flac)
     };
 
     // Define the possible serial communication speeds

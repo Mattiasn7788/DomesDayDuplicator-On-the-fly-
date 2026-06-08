@@ -275,6 +275,7 @@ qint32 Configuration::convertCaptureFormatToInt(CaptureFormat captureFormat)
     if (captureFormat == CaptureFormat::sixteenBitSigned_Quarter) return 3;
     if (captureFormat == CaptureFormat::ldfCompressed) return 4;
     if (captureFormat == CaptureFormat::flacDirect) return 5;
+    if (captureFormat == CaptureFormat::flacDirect16bit) return 6;
 
     // Default to 0
     return 0;
@@ -289,6 +290,7 @@ Configuration::CaptureFormat Configuration::convertIntToCaptureFormat(qint32 cap
     if (captureInt == 3) return CaptureFormat::sixteenBitSigned_Quarter;
     if (captureInt == 4) return CaptureFormat::ldfCompressed;
     if (captureInt == 5) return CaptureFormat::flacDirect;
+    if (captureInt == 6) return CaptureFormat::flacDirect16bit;
 
     // Default to 10 bit packed
     return CaptureFormat::tenBitPacked;

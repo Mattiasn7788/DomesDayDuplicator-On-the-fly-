@@ -31,6 +31,7 @@ public:
         Unsigned10Bit,
         Unsigned10Bit4to1Decimation,
         Signed16BitFlacOnTheFly,         // on-the-fly FLAC via ffmpeg+flac pipe (any sample rate)
+        Unsigned10BitFlacOnTheFly,       // on-the-fly FLAC direct from 10-bit USB data (40 MSPS, no resampling)
     };
     enum class TransferResult
     {
@@ -236,6 +237,7 @@ private:
 
     // On-the-fly FLAC pipe state
     FILE* flacPipeHandle = nullptr;
+    int flac16TargetSampleRateInHz = 40000000;  // target rate for Unsigned10BitFlacOnTheFly
 #ifdef _WIN32
     HANDLE flacPipeProcess = INVALID_HANDLE_VALUE;
     HANDLE flacReadPipeHandle = INVALID_HANDLE_VALUE;

@@ -45,9 +45,10 @@ ConfigurationDialog::ConfigurationDialog(QWidget *parent) :
 
     // Build the captureFormatComboBox
     ui->captureFormatComboBox->clear();
-    ui->captureFormatComboBox->addItem("8-bit FLAC", Configuration::CaptureFormat::flacDirect);
-    ui->captureFormatComboBox->addItem("16-bit Signed Raw", Configuration::CaptureFormat::sixteenBitSigned);
-    ui->captureFormatComboBox->addItem("10-bit Packed Unsigned", Configuration::CaptureFormat::tenBitPacked);
+    ui->captureFormatComboBox->addItem("8-bit FLAC",          Configuration::CaptureFormat::flacDirect);
+    ui->captureFormatComboBox->addItem("16-bit FLAC",         Configuration::CaptureFormat::flacDirect16bit);
+    ui->captureFormatComboBox->addItem("16-bit Signed Raw",   Configuration::CaptureFormat::sixteenBitSigned);
+    ui->captureFormatComboBox->addItem("10-bit Packed Unsigned (.lds)", Configuration::CaptureFormat::tenBitPacked);
     
     // sampleRateComboBox is populated dynamically in onCaptureFormatChanged()
     ui->sampleRateComboBox->clear();
@@ -372,13 +373,15 @@ void ConfigurationDialog::saveConfiguration(Configuration& configuration)
         }
         // else keep as sixteenBitSigned (40 MSPS full rate)
     }
-    // For FLAC: choose ldfCompressed vs flacDirect based on output format dropdown
+    // For 16-bit FLAC: choose ldfCompressed vs flacDirect based on output format dropdown
     else if (baseFormat == Configuration::CaptureFormat::flacDirect) {
         if (flacOutputFormat == 1) {
             finalFormat = Configuration::CaptureFormat::ldfCompressed;
         }
         // else stay as flacDirect; sample rate stored separately as kHz
     }
+    // 16-bit FLAC: sample rate stored separately, always .flac — stored as-is
+    // else if (baseFormat == flacDirect16bit): finalFormat = flacDirect16bit (already set)
 
     configuration.setCaptureFormat(finalFormat);
     configuration.setFlacCompressionLevel(ui->flacCompressionLevelComboBox->itemData(ui->flacCompressionLevelComboBox->currentIndex()).toInt());
@@ -915,17 +918,21 @@ void ConfigurationDialog::onCaptureFormatChanged(int index)
     Configuration::CaptureFormat selectedFormat = static_cast<Configuration::CaptureFormat>(
         ui->captureFormatComboBox->itemData(index).toInt());
     
-    // Show FLAC-related controls only for FLAC format
-    bool showFlacControls = (selectedFormat == Configuration::CaptureFormat::flacDirect);
+    // Show FLAC compression level for all FLAC formats
+    bool showFlacCompressionControls = (selectedFormat == Configuration::CaptureFormat::flacDirect
+                                        || selectedFormat == Configuration::CaptureFormat::flacDirect16bit);
+    ui->flacCompressionLabel->setVisible(showFlacCompressionControls);
+    ui->flacCompressionLevelComboBox->setVisible(showFlacCompressionControls);
 
-    ui->flacCompressionLabel->setVisible(showFlacControls);
-    ui->flacCompressionLevelComboBox->setVisible(showFlacControls);
-    ui->flacOutputFormatLabel->setVisible(showFlacControls);
-    ui->flacOutputFormatComboBox->setVisible(showFlacControls);
+    // Show output format (.flac / .ldf) only for 8-bit FLAC — 16-bit FLAC is always .flac
+    bool showOutputFormatControls = (selectedFormat == Configuration::CaptureFormat::flacDirect);
+    ui->flacOutputFormatLabel->setVisible(showOutputFormatControls);
+    ui->flacOutputFormatComboBox->setVisible(showOutputFormatControls);
 
-    // Show sample rate control for 16-bit formats (both raw and FLAC)
+    // Show sample rate for 8-bit FLAC, 16-bit FLAC, and raw 16-bit
     bool showSampleRateControls = (selectedFormat == Configuration::CaptureFormat::sixteenBitSigned ||
-                                   selectedFormat == Configuration::CaptureFormat::flacDirect);
+                                   selectedFormat == Configuration::CaptureFormat::flacDirect ||
+                                   selectedFormat == Configuration::CaptureFormat::flacDirect16bit);
     ui->sampleRateLabel->setVisible(showSampleRateControls);
     ui->sampleRateComboBox->setVisible(showSampleRateControls);
 
@@ -938,7 +945,7 @@ void ConfigurationDialog::onCaptureFormatChanged(int index)
     ui->sampleRateComboBox->clear();
 
     if (selectedFormat == Configuration::CaptureFormat::flacDirect) {
-        // FLAC via ffmpeg soxr — any rate works; offer all useful RF digitisation rates
+        // 8-bit FLAC via ffmpeg soxr — any rate works
         ui->sampleRateComboBox->addItem("40 MSPS",                40000);
         ui->sampleRateComboBox->addItem("28 MSPS",                28000);
         ui->sampleRateComboBox->addItem("24 MSPS (S-VHS/Video8)", 24000);
@@ -946,6 +953,11 @@ void ConfigurationDialog::onCaptureFormatChanged(int index)
         ui->sampleRateComboBox->addItem("18 MSPS",                18000);
         ui->sampleRateComboBox->addItem("16 MSPS",                16000);
         ui->sampleRateComboBox->addItem("10 MSPS",                10000);
+    } else if (selectedFormat == Configuration::CaptureFormat::flacDirect16bit) {
+        // 16-bit FLAC — 40 MSPS is direct (no ffmpeg), 20/10 MSPS use ffmpeg resample
+        ui->sampleRateComboBox->addItem("40 MSPS",          40000);
+        ui->sampleRateComboBox->addItem("20 MSPS (VHS PAL)", 20000);
+        ui->sampleRateComboBox->addItem("10 MSPS",          10000);
     } else {
         // Raw 16-bit — software downsampling supports integer fractions only
         ui->sampleRateComboBox->addItem("40 MSPS (Full Rate)", 40000);
