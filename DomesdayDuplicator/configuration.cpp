@@ -26,9 +26,29 @@
 ************************************************************************/
 
 #include "configuration.h"
+#include "DddFrontEndGain.h"
+#include "UsbDeviceProtocol.h"
+#include <algorithm>
 
 // This define should be incremented if the settings file format changes
 #define SETTINGSVERSION 4
+
+namespace
+{
+int normalizeHardwareSampleRateKHz(int value)
+{
+    // Older versions stored combo-box indices.  Index 2 meant 10 MSPS, which
+    // firmware 3.1 no longer offers; migrate it to the supported 20 MSPS mode.
+    if (value == 0)
+        return 40000;
+    if (value == 1 || value == 2)
+        return 20000;
+
+    // Hand-edited and older arbitrary output rates are mapped to the nearest
+    // supported hardware rate.  Resolve the 30 MSPS tie toward 20 MSPS.
+    return value > 30000 ? 40000 : 20000;
+}
+}
 
 Configuration::Configuration(QObject *parent) : QObject(parent)
 {
@@ -65,7 +85,12 @@ void Configuration::writeConfiguration()
     configuration->setValue("captureFormat", convertCaptureFormatToInt(settings.capture.captureFormat));
     configuration->setValue("flacCompressionLevel", settings.capture.flacCompressionLevel);
     configuration->setValue("flacOutputFormat", settings.capture.flacOutputFormat);
-    configuration->setValue("sampleRate", settings.capture.sampleRate);
+    // hardwareSampleRate is intentionally a new key. Older v4 builds reused
+    // sampleRate for host-side output resampling, so interpreting that key as an
+    // FPGA setting would silently turn many existing 40 MSPS captures into 20 MSPS.
+    configuration->setValue("hardwareSampleRate", settings.capture.sampleRate);
+    configuration->setValue("sampleRate", settings.capture.sampleRate); // downgrade-compatible mirror
+    configuration->setValue("frontEndGainSwitches", settings.capture.frontEndGainSwitches);
     configuration->endGroup();
 
     // UI
@@ -136,17 +161,37 @@ void Configuration::readConfiguration()
     // Capture
     configuration->beginGroup("capture");
     settings.capture.captureDirectory = configuration->value("captureDirectory").toString();
-    settings.capture.captureFormat = convertIntToCaptureFormat(configuration->value("captureFormat").toInt());
-    settings.capture.flacCompressionLevel = configuration->value("flacCompressionLevel", 5).toInt(); // Default to level 5
+    const int storedCaptureFormat = configuration->value("captureFormat").toInt();
+    settings.capture.captureFormat = convertIntToCaptureFormat(storedCaptureFormat);
+    settings.capture.flacCompressionLevel = std::max(0,
+        std::min(8, configuration->value("flacCompressionLevel", 8).toInt()));
     settings.capture.flacOutputFormat = configuration->value("flacOutputFormat", 0).toInt(); // Default to .flac
+    if (configuration->contains("hardwareSampleRate"))
     {
-        // Migrate old index-based values (0/1/2) to actual kHz values
-        int sr = configuration->value("sampleRate", 20000).toInt();
-        if      (sr == 0) sr = 40000;
-        else if (sr == 1) sr = 20000;
-        else if (sr == 2) sr = 10000;
-        settings.capture.sampleRate = sr;
+        settings.capture.sampleRate = normalizeHardwareSampleRateKHz(
+            configuration->value("hardwareSampleRate", 40000).toInt());
     }
+    else
+    {
+        // Migrate old v4 settings without changing the meaning of existing files.
+        // Packed, full-rate raw and post-capture LDF always acquired at 40 MSPS;
+        // only the explicit half/quarter formats and direct FLAC used sampleRate.
+        if (storedCaptureFormat == 2 || storedCaptureFormat == 3)
+        {
+            settings.capture.sampleRate = 20000;
+        }
+        else if (storedCaptureFormat == 5)
+        {
+            settings.capture.sampleRate = normalizeHardwareSampleRateKHz(
+                configuration->value("sampleRate", 20000).toInt());
+        }
+        else
+        {
+            settings.capture.sampleRate = 40000;
+        }
+    }
+    settings.capture.frontEndGainSwitches = DddFrontEndGain::NormalizeSwitchPattern(
+            configuration->value("frontEndGainSwitches", 0).toInt());
     configuration->endGroup();
 
     // UI
@@ -212,9 +257,10 @@ void Configuration::setDefault()
     // Capture
     settings.capture.captureDirectory = QDir::homePath();
     settings.capture.captureFormat = CaptureFormat::tenBitPacked;
-    settings.capture.flacCompressionLevel = 5; // Default to moderate compression
+    settings.capture.flacCompressionLevel = 8; // Official 3.1 default: best compression
     settings.capture.flacOutputFormat = 0; // Default to .flac output
-    settings.capture.sampleRate = 20000; // Default to 20 MSPS
+    settings.capture.sampleRate = 40000; // Default to 40 MSPS
+    settings.capture.frontEndGainSwitches = DddFrontEndGain::UndeclaredSwitchPattern;
 
     // UI
     settings.ui.perSideNotesEnabled = false;
@@ -224,8 +270,8 @@ void Configuration::setDefault()
     settings.ui.themeStyle = 0; // Default to Auto theme
 
     // USB
-    settings.usb.vid = 0x1D50;
-    settings.usb.pid = 0x603B;
+    settings.usb.vid = DddUsbProtocol::CurrentVendorId;
+    settings.usb.pid = DddUsbProtocol::CurrentProductId;
     settings.usb.preferredDevice = "";
     settings.usb.diskBufferQueueSize = 256 * 1024 * 1024;
     settings.usb.useSmallUsbTransferQueue = false;
@@ -271,8 +317,11 @@ qint32 Configuration::convertCaptureFormatToInt(CaptureFormat captureFormat)
 {
     if (captureFormat == CaptureFormat::tenBitPacked) return 0;
     if (captureFormat == CaptureFormat::sixteenBitSigned) return 1;
-    if (captureFormat == CaptureFormat::sixteenBitSigned_Half) return 2;
-    if (captureFormat == CaptureFormat::sixteenBitSigned_Quarter) return 3;
+    // Legacy software-decimated raw formats are never written again.  Keeping
+    // their enum values lets old callers compile while new settings use the
+    // native signed 16-bit format plus the hardware sample-rate setting.
+    if (captureFormat == CaptureFormat::sixteenBitSigned_Half) return 1;
+    if (captureFormat == CaptureFormat::sixteenBitSigned_Quarter) return 1;
     if (captureFormat == CaptureFormat::ldfCompressed) return 4;
     if (captureFormat == CaptureFormat::flacDirect) return 5;
 
@@ -285,8 +334,8 @@ Configuration::CaptureFormat Configuration::convertIntToCaptureFormat(qint32 cap
 {
     if (captureInt == 0) return CaptureFormat::tenBitPacked;
     if (captureInt == 1) return CaptureFormat::sixteenBitSigned;
-    if (captureInt == 2) return CaptureFormat::sixteenBitSigned_Half;
-    if (captureInt == 3) return CaptureFormat::sixteenBitSigned_Quarter;
+    if (captureInt == 2) return CaptureFormat::sixteenBitSigned;
+    if (captureInt == 3) return CaptureFormat::sixteenBitSigned;
     if (captureInt == 4) return CaptureFormat::ldfCompressed;
     if (captureInt == 5) return CaptureFormat::flacDirect;
 
@@ -365,12 +414,22 @@ int Configuration::getFlacOutputFormat() const
 
 void Configuration::setSampleRate(int sampleRate)
 {
-    settings.capture.sampleRate = sampleRate;
+    settings.capture.sampleRate = normalizeHardwareSampleRateKHz(sampleRate);
 }
 
 int Configuration::getSampleRate() const
 {
     return settings.capture.sampleRate;
+}
+
+void Configuration::setFrontEndGainSwitches(int switchPattern)
+{
+    settings.capture.frontEndGainSwitches = DddFrontEndGain::NormalizeSwitchPattern(switchPattern);
+}
+
+int Configuration::getFrontEndGainSwitches() const
+{
+    return settings.capture.frontEndGainSwitches;
 }
 
 // USB settings

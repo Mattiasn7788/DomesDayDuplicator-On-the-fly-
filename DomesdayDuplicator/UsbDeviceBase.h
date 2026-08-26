@@ -1,6 +1,7 @@
 #pragma once
 #include "ILogger.h"
 #include "AudioResampler.h"
+#include "UsbDeviceProtocol.h"
 #include <cstdint>
 #include <cstdio>
 #include <condition_variable>
@@ -30,7 +31,7 @@ public:
         Signed16BitQuarter,
         Unsigned10Bit,
         Unsigned10Bit4to1Decimation,
-        Signed16BitFlacOnTheFly,         // on-the-fly FLAC via ffmpeg+flac pipe (any sample rate)
+        Signed16BitFlacOnTheFly,         // native mono signed-16 FLAC encoded while capturing
     };
     enum class TransferResult
     {
@@ -42,6 +43,7 @@ public:
         UsbMemoryLimit,
         UsbTransferFailure,
         FileWriteError,
+        DeviceConfigurationError,
         SequenceMismatch,
         VerificationError,
         ProgramError,
@@ -57,12 +59,19 @@ public:
     // Device methods
     virtual bool DevicePresent(const std::string& preferredDevicePath) const = 0;
     virtual bool GetPresentDevicePaths(std::vector<std::string>& devicePaths) const = 0;
-    void SendConfigurationCommand(const std::string& preferredDevicePath, bool testMode);
+    bool SendConfigurationCommand(const std::string& preferredDevicePath, bool testMode,
+        uint8_t decimationFactor = DddUsbProtocol::FullRateDecimation);
 
     // Capture methods
-    bool StartCapture(const std::filesystem::path& filePath, CaptureFormat format, const std::string& preferredDevicePath, bool isTestMode, bool useSmallUsbTransfers, bool useAsyncFileIo, size_t usbTransferQueueSizeInBytes, size_t diskBufferQueueSizeInBytes, int flacCompressionLevel = 8, int flacOutputSampleRateInHz = 20000000);
+    bool StartCapture(const std::filesystem::path& filePath, CaptureFormat format,
+        const std::string& preferredDevicePath, bool isTestMode, bool useSmallUsbTransfers,
+        bool useAsyncFileIo, size_t usbTransferQueueSizeInBytes,
+        size_t diskBufferQueueSizeInBytes, int flacCompressionLevel = 8,
+        uint8_t decimationFactor = DddUsbProtocol::FullRateDecimation,
+        uint8_t frontEndGainSwitches = 0);
     void StopCapture();
     bool GetTransferInProgress() const;
+    bool GetCaptureSessionOpen() const;
     TransferResult GetTransferResult() const;
     size_t GetNumberOfTransfers() const;
     size_t GetNumberOfDiskBuffersWritten() const;
@@ -72,6 +81,10 @@ public:
     size_t GetClippedMinSampleCount() const;
     size_t GetClippedMaxSampleCount() const;
     bool GetTransferHadSequenceNumbers() const;
+    uint32_t GetCaptureSampleRateInHz() const;
+    uint8_t GetHardwareDecimationFactor() const;
+    uint8_t GetCaptureFrontEndGainSwitches() const;
+    const std::string& GetGatewareVersion() const;
 
     // Buffer sampling methods
     void QueueBufferSampleRequest(size_t requestedSampleLengthInBytes);
@@ -85,7 +98,7 @@ protected:
         std::atomic_flag isDiskBufferFull;
         std::atomic_flag dumpingBuffer;
 #ifdef _WIN32
-        OVERLAPPED diskWriteOverlappedBuffer;
+        OVERLAPPED diskWriteOverlappedBuffer = {};
         bool diskWriteInProgress = false;
 #endif
     };
@@ -107,7 +120,12 @@ protected:
     virtual bool DeviceConnected() const = 0;
     virtual bool ConnectToDevice(const std::string& preferredDevicePath) = 0;
     virtual void DisconnectFromDevice() = 0;
+    virtual bool GetDeviceProtocol(const std::string& preferredDevicePath, DddUsbProtocol::DeviceProtocol& protocol) const = 0;
+    virtual bool ReadDeviceRegisters(const std::string& preferredDevicePath, uint8_t address, uint8_t length, std::vector<uint8_t>& data) const = 0;
     virtual bool SendVendorSpecificCommand(const std::string& preferredDevicePath, uint8_t command, uint16_t value) = 0;
+    bool MatchesTargetDevice(uint16_t vendorId, uint16_t productId) const;
+    bool IsPrimaryTargetDevice(uint16_t vendorId, uint16_t productId) const;
+    bool ResolveTargetDevicePath(const std::string& preferredDevicePath, std::string& targetDevicePath) const;
 
     // Capture methods
     virtual void CalculateDesiredBufferCountAndSize(bool useSmallUsbTransfers, size_t usbTransferQueueSizeInBytes, size_t diskBufferQueueSizeInBytes, size_t& bufferCount, size_t& bufferSizeInBytes) const = 0;
@@ -148,6 +166,8 @@ private:
 
 private:
     // Capture methods
+    bool SendConfigurationCommandToDevice(const std::string& targetDevicePath, bool testMode,
+        uint8_t decimationFactor);
     void CaptureThread();
     void SetProcessingFinished(TransferResult result);
 
@@ -165,15 +185,27 @@ private:
     // Logging state
     const ILogger& log;
 
+    // Device selection. The two official identifier pairs are treated as generations of the
+    // same device; any user-supplied custom pair remains an exact override.
+    uint16_t targetDeviceVendorId = 0;
+    uint16_t targetDeviceProductId = 0;
+    DddUsbProtocol::DeviceProtocol configuredDeviceProtocol = DddUsbProtocol::DeviceProtocol::Unsupported;
+    bool currentFirmwareCollectionActive = false;
+    std::string capturePreferredDevicePath;
+
     // Capture settings
     std::filesystem::path captureFilePath;
-    CaptureFormat captureFormat;
+    CaptureFormat captureFormat = CaptureFormat::Signed16Bit;
     bool captureIsTestMode = false;
+    uint32_t currentCaptureSampleRateInHz = DddUsbProtocol::ConverterSampleRateInHz;
+    uint8_t currentHardwareDecimationFactor = DddUsbProtocol::FullRateDecimation;
+    uint8_t captureFrontEndGainSwitches = 0;
+    std::string configuredGatewareVersion;
     size_t currentUsbTransferQueueSizeInBytes = 0;
     bool currentUseSmallUsbTransfers = false;
 
     // Capture status
-    bool transferInProgress = false;
+    std::atomic<bool> transferInProgress = false;
     bool useWindowsOverlappedFileIo = false;
     std::atomic<TransferResult> captureResult = TransferResult::Success;
     std::atomic<size_t> transferCount = 0;
@@ -215,7 +247,7 @@ private:
     // Capture output file state
     std::ofstream captureOutputFile;
 #ifdef _WIN32
-    HANDLE windowsCaptureOutputFileHandle;
+    HANDLE windowsCaptureOutputFileHandle = INVALID_HANDLE_VALUE;
 #endif
 
 #ifdef __APPLE__
@@ -238,10 +270,15 @@ private:
     FILE* flacPipeHandle = nullptr;
 #ifdef _WIN32
     HANDLE flacPipeProcess = INVALID_HANDLE_VALUE;
-    HANDLE flacReadPipeHandle = INVALID_HANDLE_VALUE;
+    HANDLE flacErrorReadPipeHandle = INVALID_HANDLE_VALUE;
     HANDLE flacStdinWriteHandle = INVALID_HANDLE_VALUE; // raw HANDLE used for WriteFile (avoids MinGW CRT abort on broken pipe)
+    std::atomic<HANDLE> flacErrorReaderThreadHandle = nullptr;
+#else
+    int flacPipeProcessId = -1;
 #endif
-    std::thread flacReaderThread;
+    std::thread flacErrorReaderThread;
+    std::atomic<bool> flacErrorReaderStopRequested = false;
+    std::string flacErrorOutput;
 
     // Sequence/test data state
     SequenceState sequenceState = SequenceState::Sync;

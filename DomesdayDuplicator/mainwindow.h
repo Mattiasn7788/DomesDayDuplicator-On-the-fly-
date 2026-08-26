@@ -48,6 +48,7 @@
 #include <filesystem>
 #include <optional>
 #include <memory>
+#include <thread>
 #ifdef _WIN32
 #include <windows.h>
 #elif defined(__APPLE__) || defined(__linux__)
@@ -148,6 +149,7 @@ private:
 
     std::atomic<bool> isCaptureRunning = false;
     bool isCaptureStopping = false;
+    std::thread captureStopThread;
     bool playerStopRequested = false;
     std::filesystem::path captureFilePath;
     std::unique_ptr<QTimer> captureStatusUpdateTimer;

@@ -56,7 +56,7 @@ target_compile_options(DomesdayDuplicator PRIVATE
 
 # Suppress deprecation warnings from the third-party qcustomplot.cpp on all platforms
 set_source_files_properties(qcustomplot.cpp PROPERTIES
-    COMPILE_OPTIONS "-Wno-deprecated-declarations"
+    COMPILE_OPTIONS "$<$<CXX_COMPILER_ID:MSVC>:/wd4996>;$<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wno-deprecated-declarations>"
 )
 
 target_link_libraries(DomesdayDuplicator PRIVATE

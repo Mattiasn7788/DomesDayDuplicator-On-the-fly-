@@ -23,6 +23,8 @@ protected:
     bool DeviceConnected() const override;
     bool ConnectToDevice(const std::string& preferredDevicePath) override;
     void DisconnectFromDevice() override;
+    bool GetDeviceProtocol(const std::string& preferredDevicePath, DddUsbProtocol::DeviceProtocol& protocol) const override;
+    bool ReadDeviceRegisters(const std::string& preferredDevicePath, uint8_t address, uint8_t length, std::vector<uint8_t>& data) const override;
     bool SendVendorSpecificCommand(const std::string& preferredDevicePath, uint8_t command, uint16_t value) override;
 
     // Capture methods
@@ -50,10 +52,6 @@ private:
     bool FindDomesdayDeviceInstancePath(const std::wstring& preferredDevicePath, std::wstring& deviceInstancePath) const;
 
 private:
-    // Settings
-    uint16_t targetDeviceVendorId = 0;
-    uint16_t targetDeviceProductId = 0;
-
     // Device connection
     bool connectedToDevice = false;
     HANDLE captureUsbDeviceHandle = nullptr;
