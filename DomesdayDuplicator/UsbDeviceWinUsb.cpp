@@ -20,8 +20,16 @@ UsbDeviceWinUsb::UsbDeviceWinUsb(const ILogger& log)
 //----------------------------------------------------------------------------------------------------------------------
 UsbDeviceWinUsb::~UsbDeviceWinUsb()
 {
-    // Ensure we're disconnected from the device
-    DisconnectFromDevice();
+    // Ensure any capture thread has stopped and protocol-v1 firmware receives B5 stop
+    // before this backend is destroyed.
+    if (GetCaptureSessionOpen())
+    {
+        StopCapture();
+    }
+    else if (DeviceConnected())
+    {
+        DisconnectFromDevice();
+    }
 }
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -34,9 +42,6 @@ bool UsbDeviceWinUsb::Initialize(uint16_t vendorId, uint16_t productId)
         return false;
     }
 
-    // Store the target device vendor and product ID
-    targetDeviceVendorId = vendorId;
-    targetDeviceProductId = productId;
     return true;
 }
 
@@ -51,13 +56,15 @@ bool UsbDeviceWinUsb::DevicePresent(const std::string& preferredDevicePath) cons
         return true;
     }
 
-    // Attempt to locate the USB device
-    std::wstring deviceInstancePath;
-    if (!FindDomesdayDeviceInstancePath(Utf8StringToWString(preferredDevicePath), deviceInstancePath))
+    // Resolve a current physical path. A stale preference may fall back here, but all
+    // subsequent operations use the resolved path strictly.
+    std::string targetDevicePath;
+    if (!ResolveTargetDevicePath(preferredDevicePath, targetDevicePath))
     {
         Log().Trace("DevicePresent(): Failed to locate USB device");
         return false;
     }
+    std::wstring deviceInstancePath = Utf8StringToWString(targetDevicePath);
 
     // Temporarily connect to the device to verify it's present and connectable
     HANDLE deviceHandle;
@@ -363,9 +370,15 @@ bool UsbDeviceWinUsb::GetAllDomesdayDeviceInstancePaths(std::vector<std::wstring
             Log().Error("WinUsb_GetDescriptor failed with error code {0} for device with instance path: {1}", lastError, deviceInstancePath);
             continue;
         }
+        if (transferredLength != sizeof(deviceDescriptor))
+        {
+            Log().Error("WinUsb_GetDescriptor returned {0} bytes when {1} were expected for device with instance path: {2}",
+                transferredLength, sizeof(deviceDescriptor), deviceInstancePath);
+            continue;
+        }
 
         // If the device doesn't match the target vendor and product IDs for the domesday device, skip it.
-        if ((deviceDescriptor.idVendor != targetDeviceVendorId) || (deviceDescriptor.idProduct != targetDeviceProductId))
+        if (!MatchesTargetDevice(deviceDescriptor.idVendor, deviceDescriptor.idProduct))
         {
             continue;
         }
@@ -392,9 +405,17 @@ bool UsbDeviceWinUsb::GetAllDomesdayDeviceInstancePaths(std::vector<std::wstring
             continue;
         }
 
-        // Since the target device matches, store the instance path.
+        // Since the target device matches, store the instance path. The generation explicitly
+        // named in settings comes before the compatible fallback generation when no path is selected.
         Log().Trace("Found matching USB device with instance path: {0}", deviceInstancePath);
-        matchingDeviceInstancePaths.push_back(deviceInstancePath);
+        if (IsPrimaryTargetDevice(deviceDescriptor.idVendor, deviceDescriptor.idProduct))
+        {
+            matchingDeviceInstancePaths.insert(matchingDeviceInstancePaths.begin(), deviceInstancePath);
+        }
+        else
+        {
+            matchingDeviceInstancePaths.push_back(deviceInstancePath);
+        }
     }
 
     // Return the list of device paths to the caller
@@ -420,9 +441,13 @@ bool UsbDeviceWinUsb::FindDomesdayDeviceInstancePath(const std::wstring& preferr
         return false;
     }
 
-    // Select the device to connect to. If we have a preferred device specified and it is present, we use that,
-    // otherwise we default to the first detected device.
-    std::wstring targetDeviceInstancePath = matchingDeviceInstancePaths.front();
+    // A non-empty path is already resolved by the caller and must match exactly. This prevents
+    // a hot-unplug from silently redirecting later commands to another attached device.
+    std::wstring targetDeviceInstancePath;
+    if (preferredDevicePath.empty())
+    {
+        targetDeviceInstancePath = matchingDeviceInstancePaths.front();
+    }
     if (!preferredDevicePath.empty())
     {
         for (const std::wstring& matchingDeviceInstancePath : matchingDeviceInstancePaths)
@@ -435,8 +460,117 @@ bool UsbDeviceWinUsb::FindDomesdayDeviceInstancePath(const std::wstring& preferr
         }
     }
 
+    if (targetDeviceInstancePath.empty())
+    {
+        Log().Info("The selected Domesday Duplicator USB device is no longer present");
+        return false;
+    }
+
     // Return the device instance path to the caller
     deviceInstancePath = targetDeviceInstancePath;
+    return true;
+}
+
+//----------------------------------------------------------------------------------------------------------------------
+bool UsbDeviceWinUsb::GetDeviceProtocol(const std::string& preferredDevicePath, DddUsbProtocol::DeviceProtocol& protocol) const
+{
+    std::wstring deviceInstancePath;
+    if (!FindDomesdayDeviceInstancePath(Utf8StringToWString(preferredDevicePath), deviceInstancePath))
+    {
+        Log().Error("GetDeviceProtocol(): Failed to locate the selected device");
+        return false;
+    }
+
+    HANDLE deviceHandle;
+    WINUSB_INTERFACE_HANDLE winUsbInterfaceHandle;
+    if (!ConnectToDevice(deviceInstancePath, deviceHandle, winUsbInterfaceHandle))
+    {
+        Log().Error("GetDeviceProtocol(): Failed to connect to the selected device");
+        return false;
+    }
+    std::shared_ptr<void> scopedDeviceDisconnectHandler((void*)nullptr,
+        [&](void*) { DisconnectFromDevice(deviceHandle, winUsbInterfaceHandle); });
+
+    USB_DEVICE_DESCRIPTOR deviceDescriptor = {};
+    ULONG transferredLength = 0;
+    BOOL getDescriptorReturn = WinUsb_GetDescriptor(winUsbInterfaceHandle, USB_DEVICE_DESCRIPTOR_TYPE, 0, 0,
+        reinterpret_cast<UCHAR*>(&deviceDescriptor), sizeof(deviceDescriptor), &transferredLength);
+    if (getDescriptorReturn == FALSE)
+    {
+        DWORD lastError = GetLastError();
+        Log().Error("WinUsb_GetDescriptor failed with error code {0} for device with instance path: {1}",
+            lastError, deviceInstancePath);
+        return false;
+    }
+    if (transferredLength != sizeof(deviceDescriptor))
+    {
+        Log().Error("WinUsb_GetDescriptor returned {0} bytes when {1} were expected for device with instance path: {2}",
+            transferredLength, sizeof(deviceDescriptor), deviceInstancePath);
+        return false;
+    }
+
+    protocol = DddUsbProtocol::ClassifyDevice(deviceDescriptor.idVendor, deviceDescriptor.idProduct,
+        deviceDescriptor.bcdDevice);
+    if (protocol == DddUsbProtocol::DeviceProtocol::Unsupported)
+    {
+        Log().Error("GetDeviceProtocol(): Unsupported USB protocol version {0}",
+            static_cast<unsigned int>(deviceDescriptor.bcdDevice >> 8));
+    }
+    return true;
+}
+
+//----------------------------------------------------------------------------------------------------------------------
+bool UsbDeviceWinUsb::ReadDeviceRegisters(const std::string& preferredDevicePath, uint8_t address, uint8_t length,
+    std::vector<uint8_t>& data) const
+{
+    data.clear();
+    if (length == 0)
+    {
+        return false;
+    }
+
+    std::wstring deviceInstancePath;
+    if (!FindDomesdayDeviceInstancePath(Utf8StringToWString(preferredDevicePath), deviceInstancePath))
+    {
+        Log().Error("ReadDeviceRegisters(): Failed to locate the selected device");
+        return false;
+    }
+
+    HANDLE deviceHandle;
+    WINUSB_INTERFACE_HANDLE winUsbInterfaceHandle;
+    if (!ConnectToDevice(deviceInstancePath, deviceHandle, winUsbInterfaceHandle))
+    {
+        Log().Error("ReadDeviceRegisters(): Failed to connect to the selected device");
+        return false;
+    }
+    std::shared_ptr<void> scopedDeviceDisconnectHandler((void*)nullptr,
+        [&](void*) { DisconnectFromDevice(deviceHandle, winUsbInterfaceHandle); });
+
+    WINUSB_SETUP_PACKET setupPacket = {};
+    setupPacket.RequestType = 0xC0;
+    setupPacket.Request = DddUsbProtocol::RegisterReadRequest;
+    setupPacket.Value = address;
+    setupPacket.Index = 0;
+    setupPacket.Length = length;
+
+    std::vector<uint8_t> registerData(length, 0);
+    ULONG transferredLength = 0;
+    BOOL controlTransferReturn = WinUsb_ControlTransfer(winUsbInterfaceHandle, setupPacket,
+        registerData.data(), length, &transferredLength, nullptr);
+    if (controlTransferReturn != TRUE)
+    {
+        DWORD lastError = GetLastError();
+        Log().Error("ReadDeviceRegisters(): WinUsb_ControlTransfer failed with error code {0}", lastError);
+        return false;
+    }
+    if (transferredLength != length)
+    {
+        Log().Error("ReadDeviceRegisters(): WinUsb_ControlTransfer returned {0} bytes when {1} were expected",
+            transferredLength, static_cast<unsigned int>(length));
+        return false;
+    }
+
+    data = std::move(registerData);
     return true;
 }
 

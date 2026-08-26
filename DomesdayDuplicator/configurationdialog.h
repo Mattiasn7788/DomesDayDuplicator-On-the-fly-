@@ -59,8 +59,10 @@ public:
     void saveConfiguration(Configuration& configuration);
     
     // FLAC encoding helper functions - public for access from MainWindow
-    void encodeToLdf(const QString& inputFilePath, const QString& outputFilePath, int downsampleFactor = 1);
-    void encodeToFlacDirect(const QString& inputFilePath, const QString& outputFilePath, int compressionLevel = 5, int downsampleFactor = 1);
+    bool encodeToLdf(const QString& inputFilePath, const QString& outputFilePath,
+        int sampleRateKHz = 40000, bool testMode = false, int frontEndGainSwitches = 0,
+        const QString& gatewareVersion = QString());
+    void encodeToFlacDirect(const QString& inputFilePath, const QString& outputFilePath, int compressionLevel = 8, int downsampleFactor = 1);
     void encodeToFlac(const QString& inputFilePath, const QString& outputFilePath);  // Legacy function
     void downsampleRawFile(const QString& inputFilePath, const QString& outputFilePath, int downsampleFactor);
 

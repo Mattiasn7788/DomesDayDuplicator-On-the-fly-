@@ -1,6 +1,14 @@
+#ifdef _WIN32
+#include <winsock2.h>
+#endif
 #include "UsbDeviceLibUsb.h"
 #include <memory>
 #include <functional>
+
+namespace
+{
+constexpr unsigned int ControlTransferTimeoutInMilliseconds = 1000;
+}
 
 //----------------------------------------------------------------------------------------------------------------------
 // Constructors
@@ -12,8 +20,16 @@ UsbDeviceLibUsb::UsbDeviceLibUsb(const ILogger& log)
 //----------------------------------------------------------------------------------------------------------------------
 UsbDeviceLibUsb::~UsbDeviceLibUsb()
 {
-    // Ensure we're disconnected from the device
-    DisconnectFromDevice();
+    // Ensure any capture thread has stopped and protocol-v1 firmware receives B5 stop
+    // before this backend is destroyed.
+    if (GetCaptureSessionOpen())
+    {
+        StopCapture();
+    }
+    else if (DeviceConnected())
+    {
+        DisconnectFromDevice();
+    }
 
     // Delete the libUSB context
     if (libUsbContext != nullptr)
@@ -31,10 +47,6 @@ bool UsbDeviceLibUsb::Initialize(uint16_t vendorId, uint16_t productId)
         Log().Error("Initialize(): Base class initialization failed");
         return false;
     }
-
-    // Store the target device vendor and product ID
-    targetDeviceVendorId = vendorId;
-    targetDeviceProductId = productId;
 
     // Initialise libUSB
 #if LIBUSB_API_VERSION >= 0x0100010A
@@ -62,9 +74,10 @@ bool UsbDeviceLibUsb::DevicePresent(const std::string& preferredDevicePath) cons
         return true;
     }
 
-    // Check if there are any usb devices present
-    std::vector<std::string> presentDevicePaths;
-    if (!GetPresentDevicePaths(presentDevicePaths))
+    // Resolve a current physical path. A stale preference may fall back here, but all
+    // subsequent operations use the resolved path strictly.
+    std::string targetDevicePath;
+    if (!ResolveTargetDevicePath(preferredDevicePath, targetDevicePath))
     {
         Log().Trace("DevicePresent(): Failed to locate USB device");
         return false;
@@ -73,7 +86,7 @@ bool UsbDeviceLibUsb::DevicePresent(const std::string& preferredDevicePath) cons
     // Temporarily connect to the device to verify it's present and connectable
     libusb_device* usbDevice = nullptr;
     libusb_device_handle* usbDeviceHandle = nullptr;
-    if (!ConnectToDevice(preferredDevicePath, usbDevice, usbDeviceHandle))
+    if (!ConnectToDevice(targetDevicePath, usbDevice, usbDeviceHandle))
     {
         Log().Warning("DevicePresent(): Failed to connect to device");
         return false;
@@ -267,9 +280,13 @@ bool UsbDeviceLibUsb::ConnectToDevice(const std::string& preferredDevicePath, li
         return false;
     }
 
-    // Select the device to connect to. If we have a preferred device specified and it is present, we use that,
-    // otherwise we default to the first detected device.
-    libusb_device* targetDevice = matchingDevices.front();
+    // A non-empty path is already resolved by the caller and must match exactly. This prevents
+    // a hot-unplug from silently redirecting later commands to another attached device.
+    libusb_device* targetDevice = nullptr;
+    if (preferredDevicePath.empty())
+    {
+        targetDevice = matchingDevices.front();
+    }
     if (!preferredDevicePath.empty())
     {
         for (auto matchingDevice : matchingDevices)
@@ -286,6 +303,12 @@ bool UsbDeviceLibUsb::ConnectToDevice(const std::string& preferredDevicePath, li
                 break;
             }
         }
+    }
+
+    if (targetDevice == nullptr)
+    {
+        Log().Info("The selected Domesday Duplicator USB device is no longer present");
+        return false;
     }
 
     // Open the USB device
@@ -401,7 +424,7 @@ bool UsbDeviceLibUsb::GetAllDomesdayDevices(libusb_device** usbDevicesRaw, std::
         }
 
         // If the device doesn't match the target vendor and product IDs for the domesday device, skip it.
-        if ((deviceDescriptor.idVendor != targetDeviceVendorId) || (deviceDescriptor.idProduct != targetDeviceProductId))
+        if (!MatchesTargetDevice(deviceDescriptor.idVendor, deviceDescriptor.idProduct))
         {
             continue;
         }
@@ -414,13 +437,106 @@ bool UsbDeviceLibUsb::GetAllDomesdayDevices(libusb_device** usbDevicesRaw, std::
             continue;
         }
 
-        // Since the target device matches, store it.
+        // Since the target device matches, store it. The generation explicitly named in
+        // settings comes before the compatible fallback generation when no path is selected.
         Log().Trace("Found matching device with instance path: {0}");
-        matchingDevices.push_back(usbDevice);
+        if (IsPrimaryTargetDevice(deviceDescriptor.idVendor, deviceDescriptor.idProduct))
+        {
+            matchingDevices.insert(matchingDevices.begin(), usbDevice);
+        }
+        else
+        {
+            matchingDevices.push_back(usbDevice);
+        }
     }
 
     // Return the list of devices to the caller
     domesdayDevices = std::move(matchingDevices);
+    return true;
+}
+
+//----------------------------------------------------------------------------------------------------------------------
+bool UsbDeviceLibUsb::GetDeviceProtocol(const std::string& preferredDevicePath, DddUsbProtocol::DeviceProtocol& protocol) const
+{
+    libusb_device* usbDevice = nullptr;
+    libusb_device_handle* usbDeviceHandle = nullptr;
+    if (!ConnectToDevice(preferredDevicePath, usbDevice, usbDeviceHandle))
+    {
+        Log().Error("GetDeviceProtocol(): Failed to connect to the selected device");
+        return false;
+    }
+    std::shared_ptr<void> scopedDeviceDisconnectHandler(nullptr,
+        [&](void*) { DisconnectFromDevice(usbDevice, usbDeviceHandle); });
+
+    libusb_device_descriptor deviceDescriptor = {};
+    int getDescriptorReturn = libusb_get_device_descriptor(usbDevice, &deviceDescriptor);
+    if (getDescriptorReturn != 0)
+    {
+        Log().Error("libusb_get_device_descriptor failed with error code {0}:{1}", getDescriptorReturn,
+            libusb_error_name(getDescriptorReturn));
+        return false;
+    }
+
+    protocol = DddUsbProtocol::ClassifyDevice(deviceDescriptor.idVendor, deviceDescriptor.idProduct,
+        deviceDescriptor.bcdDevice);
+    if (protocol == DddUsbProtocol::DeviceProtocol::Unsupported)
+    {
+        Log().Error("GetDeviceProtocol(): Unsupported USB protocol version {0}",
+            static_cast<unsigned int>(deviceDescriptor.bcdDevice >> 8));
+    }
+    return true;
+}
+
+//----------------------------------------------------------------------------------------------------------------------
+bool UsbDeviceLibUsb::ReadDeviceRegisters(const std::string& preferredDevicePath, uint8_t address, uint8_t length,
+    std::vector<uint8_t>& data) const
+{
+    data.clear();
+    if (length == 0)
+    {
+        return false;
+    }
+
+    libusb_device* usbDevice = nullptr;
+    libusb_device_handle* usbDeviceHandle = nullptr;
+    if (!ConnectToDevice(preferredDevicePath, usbDevice, usbDeviceHandle))
+    {
+        Log().Error("ReadDeviceRegisters(): Failed to connect to the selected device");
+        return false;
+    }
+    std::shared_ptr<void> scopedDeviceDisconnectHandler(nullptr,
+        [&](void*) { DisconnectFromDevice(usbDevice, usbDeviceHandle); });
+
+    int claimInterfaceReturn = libusb_claim_interface(usbDeviceHandle, 0);
+    if (claimInterfaceReturn != 0)
+    {
+        Log().Error("libusb_claim_interface failed with error code {0}:{1}", claimInterfaceReturn,
+            libusb_error_name(claimInterfaceReturn));
+        return false;
+    }
+    std::shared_ptr<void> interfaceReleaseHandler(nullptr,
+        [&](void*) { libusb_release_interface(usbDeviceHandle, 0); });
+
+    std::vector<uint8_t> registerData(length, 0);
+    int receivedLength = libusb_control_transfer(usbDeviceHandle, 0xC0,
+        DddUsbProtocol::RegisterReadRequest, address, 0, registerData.data(), length,
+        ControlTransferTimeoutInMilliseconds);
+    if (receivedLength != length)
+    {
+        if (receivedLength < 0)
+        {
+            Log().Error("libusb_control_transfer failed with error code {0}:{1}", receivedLength,
+                libusb_error_name(receivedLength));
+        }
+        else
+        {
+            Log().Error("ReadDeviceRegisters(): Received {0} bytes when {1} were expected", receivedLength,
+                static_cast<unsigned int>(length));
+        }
+        return false;
+    }
+
+    data = std::move(registerData);
     return true;
 }
 
@@ -455,8 +571,8 @@ bool UsbDeviceLibUsb::SendVendorSpecificCommand(const std::string& preferredDevi
         });
 
     // Perform a control transfer of type 0x40 (vendor specific command with no data packets)
-    unsigned int timeout = 0;
-    int libUsbControlTransferReturn = libusb_control_transfer(usbDeviceHandle, 0x40, command, value, 0, nullptr, 0, timeout);
+    int libUsbControlTransferReturn = libusb_control_transfer(usbDeviceHandle, 0x40,
+        command, value, 0, nullptr, 0, ControlTransferTimeoutInMilliseconds);
     if (libUsbControlTransferReturn < 0)
     {
         Log().Error("libusb_control_transfer failed with error code {0}:{1}", libUsbControlTransferReturn, libusb_error_name(libUsbControlTransferReturn));

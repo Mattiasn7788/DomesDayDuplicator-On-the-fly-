@@ -1,18 +1,33 @@
 #include "UsbDeviceBase.h"
+#include "DddFrontEndGain.h"
 #ifdef _WIN32
 #include <memoryapi.h>
 #include <io.h>
 #include <fcntl.h>
 
-// Opens a cmd.exe pipe without showing a console window.
-// Returns the write-end FILE* (for ffmpeg stdin) and stores the process handle and
-// a read HANDLE for the process stdout (flac output).
-// Uses wide-character CreateProcessW so paths with non-ASCII characters (accented
-// folder names, etc.) are handled correctly.
-static FILE* openPipeNoWindow(const std::wstring& cmd, HANDLE& outProcess, HANDLE& outReadPipe)
+static std::wstring utf8ToWide(const std::string& text)
+{
+    if (text.empty())
+        return std::wstring();
+    const int required = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+        text.data(), static_cast<int>(text.size()), nullptr, 0);
+    if (required <= 0)
+        return std::wstring(text.begin(), text.end());
+    std::wstring wide(static_cast<size_t>(required), L'\0');
+    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(),
+        static_cast<int>(text.size()), wide.data(), required);
+    return wide;
+}
+
+// Starts flac.exe without a shell or visible console window. The application writes
+// signed-16 samples to the returned FILE* while flac writes the target file itself, so
+// it can seek back and finalise STREAMINFO. Stderr is kept for diagnostics. Avoiding
+// cmd.exe also keeps file names and metadata out of a shell command line.
+static FILE* openFlacPipeNoWindow(const std::wstring& executable,
+    const std::wstring& arguments, HANDLE& outProcess, HANDLE& outErrorReadPipe)
 {
     outProcess = INVALID_HANDLE_VALUE;
-    outReadPipe = INVALID_HANDLE_VALUE;
+    outErrorReadPipe = INVALID_HANDLE_VALUE;
 
     SECURITY_ATTRIBUTES sa = {};
     sa.nLength = sizeof(sa);
@@ -22,75 +37,193 @@ static FILE* openPipeNoWindow(const std::wstring& cmd, HANDLE& outProcess, HANDL
     HANDLE hStdinRead, hStdinWrite;
     if (!CreatePipe(&hStdinRead, &hStdinWrite, &sa, 0))
         return nullptr;
-    SetHandleInformation(hStdinWrite, HANDLE_FLAG_INHERIT, 0); // write end is ours, non-inheritable
-
-    // Stdout pipe: child writes to hStdoutWrite, our process reads from hStdoutRead
-    HANDLE hStdoutRead, hStdoutWrite;
-    if (!CreatePipe(&hStdoutRead, &hStdoutWrite, &sa, 0))
+    if (!SetHandleInformation(hStdinWrite, HANDLE_FLAG_INHERIT, 0))
     {
         CloseHandle(hStdinRead);
         CloseHandle(hStdinWrite);
         return nullptr;
     }
-    SetHandleInformation(hStdoutRead, HANDLE_FLAG_INHERIT, 0); // read end is ours, non-inheritable
+
+    // flac writes the actual file itself; its console output and diagnostics can share
+    // this pipe without touching capture data.
+    HANDLE hStderrRead, hStderrWrite;
+    if (!CreatePipe(&hStderrRead, &hStderrWrite, &sa, 0))
+    {
+        CloseHandle(hStdinRead);
+        CloseHandle(hStdinWrite);
+        return nullptr;
+    }
+    if (!SetHandleInformation(hStderrRead, HANDLE_FLAG_INHERIT, 0))
+    {
+        CloseHandle(hStdinRead);
+        CloseHandle(hStdinWrite);
+        CloseHandle(hStderrRead);
+        CloseHandle(hStderrWrite);
+        return nullptr;
+    }
 
     STARTUPINFOW si = {};
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
     si.wShowWindow = SW_HIDE;
     si.hStdInput  = hStdinRead;
-    si.hStdOutput = hStdoutWrite;
-    si.hStdError  = GetStdHandle(STD_ERROR_HANDLE);
+    si.hStdOutput = hStderrWrite;
+    si.hStdError  = hStderrWrite;
 
     PROCESS_INFORMATION pi = {};
-    // cmd.exe /c strips the first and last " from the command, so wrap the
-    // entire command in outer quotes so the inner quoted paths survive intact.
-    std::wstring fullCmd = L"cmd.exe /c \"" + cmd + L"\"";
-    BOOL ok = CreateProcessW(NULL, const_cast<wchar_t*>(fullCmd.c_str()),
+    std::wstring commandLine = L"\"" + executable + L"\" " + arguments;
+    std::vector<wchar_t> mutableCommandLine(commandLine.begin(), commandLine.end());
+    mutableCommandLine.push_back(L'\0');
+    BOOL ok = CreateProcessW(executable.c_str(), mutableCommandLine.data(),
                              NULL, NULL, TRUE, CREATE_NO_WINDOW,
                              NULL, NULL, &si, &pi);
 
     // Close handles we passed to the child — child has its own copies
     CloseHandle(hStdinRead);
-    CloseHandle(hStdoutWrite);
+    CloseHandle(hStderrWrite);
 
     if (!ok)
     {
         CloseHandle(hStdinWrite);
-        CloseHandle(hStdoutRead);
+        CloseHandle(hStderrRead);
         return nullptr;
     }
 
     CloseHandle(pi.hThread);
     outProcess = pi.hProcess;
-    outReadPipe = hStdoutRead;
+    outErrorReadPipe = hStderrRead;
 
     int fd = _open_osfhandle(reinterpret_cast<intptr_t>(hStdinWrite), _O_WRONLY | _O_BINARY);
     if (fd == -1)
     {
         CloseHandle(hStdinWrite);
-        CloseHandle(hStdoutRead);
+        CloseHandle(hStderrRead);
+        TerminateProcess(pi.hProcess, 1);
+        WaitForSingleObject(pi.hProcess, 5000);
         CloseHandle(pi.hProcess);
         outProcess = INVALID_HANDLE_VALUE;
-        outReadPipe = INVALID_HANDLE_VALUE;
+        outErrorReadPipe = INVALID_HANDLE_VALUE;
         return nullptr;
     }
-    return _fdopen(fd, "wb");
+    FILE* pipeFile = _fdopen(fd, "wb");
+    if (pipeFile == nullptr)
+    {
+        _close(fd); // also closes hStdinWrite, now owned by the CRT descriptor
+        CloseHandle(hStderrRead);
+        TerminateProcess(pi.hProcess, 1);
+        WaitForSingleObject(pi.hProcess, 5000);
+        CloseHandle(pi.hProcess);
+        outProcess = INVALID_HANDLE_VALUE;
+        outErrorReadPipe = INVALID_HANDLE_VALUE;
+        return nullptr;
+    }
+    return pipeFile;
 }
 #else
 #include <sched.h>
+#include <signal.h>
 #include <sys/mman.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <pthread.h>
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #endif
 #endif
 #include <iostream>
+#include <algorithm>
 #include <thread>
 #include <functional>
 #include <cassert>
+#include <cerrno>
+#include <stdexcept>
 #ifdef __APPLE__
 #include <fcntl.h>
 #include <unistd.h>
+#endif
+
+#ifndef _WIN32
+static bool waitForFlacProcess(pid_t processId, int timeoutInMilliseconds, int& status)
+{
+    const auto deadline = std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(timeoutInMilliseconds);
+    while (true)
+    {
+        const pid_t waitResult = waitpid(processId, &status, WNOHANG);
+        if (waitResult == processId)
+            return true;
+        if (waitResult < 0 && errno != EINTR)
+            return false;
+        if (std::chrono::steady_clock::now() >= deadline)
+            return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+}
+
+static void signalFlacProcessGroup(pid_t processId, int signalNumber)
+{
+    // The child creates its own process group before exec. Signal both the group
+    // and the leader so a very early setpgid race cannot leave either the shell
+    // or encoder behind.
+    ::kill(-processId, signalNumber);
+    ::kill(processId, signalNumber);
+}
+
+static bool terminateFlacProcess(pid_t processId, int& status)
+{
+    signalFlacProcessGroup(processId, SIGTERM);
+    if (waitForFlacProcess(processId, 5000, status))
+        return true;
+    signalFlacProcessGroup(processId, SIGKILL);
+    return waitForFlacProcess(processId, 5000, status);
+}
+
+static FILE* openFlacPipeProcess(const std::string& command, int& outProcessId)
+{
+    outProcessId = -1;
+    int pipeHandles[2] = {-1, -1};
+    if (pipe(pipeHandles) != 0)
+        return nullptr;
+
+    const pid_t processId = fork();
+    if (processId < 0)
+    {
+        close(pipeHandles[0]);
+        close(pipeHandles[1]);
+        return nullptr;
+    }
+
+    if (processId == 0)
+    {
+        setpgid(0, 0);
+        if (dup2(pipeHandles[0], STDIN_FILENO) < 0)
+            _exit(127);
+        close(pipeHandles[0]);
+        close(pipeHandles[1]);
+        execl("/bin/sh", "sh", "-c", command.c_str(), static_cast<char*>(nullptr));
+        _exit(127);
+    }
+
+    // The child also calls setpgid; this parent-side call closes the small race
+    // before it reaches exec. EACCES merely means the child won that race.
+    setpgid(processId, processId);
+    close(pipeHandles[0]);
+    FILE* pipeFile = fdopen(pipeHandles[1], "wb");
+    if (pipeFile == nullptr)
+    {
+        close(pipeHandles[1]);
+        int status = 0;
+        terminateFlacProcess(processId, status);
+        return nullptr;
+    }
+
+    // ProcessingThread writes whole conversion buffers synchronously; disabling
+    // stdio buffering ensures fclose never has a hidden backlog to flush.
+    setvbuf(pipeFile, nullptr, _IONBF, 0);
+    outProcessId = static_cast<int>(processId);
+    return pipeFile;
+}
 #endif
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -107,6 +240,9 @@ UsbDeviceBase::~UsbDeviceBase()
 //----------------------------------------------------------------------------------------------------------------------
 bool UsbDeviceBase::Initialize(uint16_t vendorId, uint16_t productId)
 {
+    targetDeviceVendorId = vendorId;
+    targetDeviceProductId = productId;
+
     // Attempt to retrieve the initial process working set allocation
 #ifdef _WIN32
     BOOL getProcessWorkingSetSizeReturn = GetProcessWorkingSetSize(GetCurrentProcess(), &originalProcessMinimumWorkingSetSizeInBytes, &originalProcessMaximumWorkingSetSizeInBytes);
@@ -131,22 +267,229 @@ const ILogger& UsbDeviceBase::Log() const
 //----------------------------------------------------------------------------------------------------------------------
 // Device methods
 //----------------------------------------------------------------------------------------------------------------------
-void UsbDeviceBase::SendConfigurationCommand(const std::string& preferredDevicePath, bool testMode)
+bool UsbDeviceBase::MatchesTargetDevice(uint16_t vendorId, uint16_t productId) const
 {
-    // Bit 0: Set test mode
-    // Bit 1: Unused
-    // Bit 2: Unused
-    // Bit 3: Unused
-    // Bit 4: Unused
-    uint16_t configurationFlags = 0b00000;
-    configurationFlags |= (testMode ? 0b00001 : 0b00000);
-    SendVendorSpecificCommand(preferredDevicePath, 0xB6, configurationFlags);
+    return DddUsbProtocol::MatchesConfiguredDevice(targetDeviceVendorId, targetDeviceProductId,
+        vendorId, productId);
+}
+
+//----------------------------------------------------------------------------------------------------------------------
+bool UsbDeviceBase::IsPrimaryTargetDevice(uint16_t vendorId, uint16_t productId) const
+{
+    return vendorId == targetDeviceVendorId && productId == targetDeviceProductId;
+}
+
+//----------------------------------------------------------------------------------------------------------------------
+bool UsbDeviceBase::ResolveTargetDevicePath(const std::string& preferredDevicePath, std::string& targetDevicePath) const
+{
+    std::vector<std::string> presentDevicePaths;
+    if (!GetPresentDevicePaths(presentDevicePaths) || presentDevicePaths.empty())
+    {
+        return false;
+    }
+
+    targetDevicePath = presentDevicePaths.front();
+    if (!preferredDevicePath.empty())
+    {
+        const auto preferredDevice = std::find(presentDevicePaths.begin(), presentDevicePaths.end(), preferredDevicePath);
+        if (preferredDevice != presentDevicePaths.end())
+        {
+            targetDevicePath = *preferredDevice;
+        }
+        else if (presentDevicePaths.size() != 1)
+        {
+            // A firmware update can legitimately change the saved physical path. If
+            // exactly one DDD is attached it is unambiguous and safe to adopt it; with
+            // multiple devices, do not silently configure a different unit.
+            return false;
+        }
+    }
+    return true;
+}
+
+//----------------------------------------------------------------------------------------------------------------------
+bool UsbDeviceBase::SendConfigurationCommand(const std::string& preferredDevicePath, bool testMode,
+    uint8_t decimationFactor)
+{
+    if (transferInProgress)
+    {
+        Log().Error("SendConfigurationCommand(): Device configuration cannot change during capture");
+        return false;
+    }
+
+    std::string targetDevicePath;
+    if (!ResolveTargetDevicePath(preferredDevicePath, targetDevicePath))
+    {
+        Log().Error("SendConfigurationCommand(): Failed to locate a target device");
+        return false;
+    }
+    return SendConfigurationCommandToDevice(targetDevicePath, testMode, decimationFactor);
+}
+
+//----------------------------------------------------------------------------------------------------------------------
+bool UsbDeviceBase::SendConfigurationCommandToDevice(const std::string& targetDevicePath, bool testMode,
+    uint8_t decimationFactor)
+{
+    configuredGatewareVersion.clear();
+    if (!DddUsbProtocol::IsSupportedDecimationFactor(decimationFactor))
+    {
+        Log().Error("SendConfigurationCommand(): Unsupported decimation factor {0}",
+            static_cast<unsigned int>(decimationFactor));
+        configuredDeviceProtocol = DddUsbProtocol::DeviceProtocol::Unsupported;
+        return false;
+    }
+
+    DddUsbProtocol::DeviceProtocol protocol = DddUsbProtocol::DeviceProtocol::Unsupported;
+    if (!GetDeviceProtocol(targetDevicePath, protocol))
+    {
+        Log().Error("SendConfigurationCommand(): Failed to identify the selected device protocol");
+        configuredDeviceProtocol = DddUsbProtocol::DeviceProtocol::Unsupported;
+        return false;
+    }
+
+    switch (protocol)
+    {
+    case DddUsbProtocol::DeviceProtocol::Legacy:
+        if (decimationFactor != DddUsbProtocol::FullRateDecimation)
+        {
+            Log().Error("SendConfigurationCommand(): 20 MSPS hardware decimation requires firmware 3.1 or later");
+            configuredDeviceProtocol = DddUsbProtocol::DeviceProtocol::Unsupported;
+            return false;
+        }
+        if (!SendVendorSpecificCommand(targetDevicePath,
+            DddUsbProtocol::LegacyConfigurationRequest, testMode ? 1 : 0))
+        {
+            Log().Error("SendConfigurationCommand(): The legacy device rejected the configuration request");
+            configuredDeviceProtocol = DddUsbProtocol::DeviceProtocol::Unsupported;
+            return false;
+        }
+        configuredDeviceProtocol = protocol;
+        return true;
+    case DddUsbProtocol::DeviceProtocol::Version1:
+    {
+        std::vector<uint8_t> identity;
+        if (!ReadDeviceRegisters(targetDevicePath, DddUsbProtocol::IdentityRegister,
+            DddUsbProtocol::IdentityLength, identity) || identity.size() != DddUsbProtocol::IdentityLength)
+        {
+            Log().Error("SendConfigurationCommand(): Failed to read the firmware 3.1 FPGA identity block");
+            configuredDeviceProtocol = DddUsbProtocol::DeviceProtocol::Unsupported;
+            return false;
+        }
+        if (!DddUsbProtocol::IsSupportedApplicationIdentity(identity[DddUsbProtocol::IdentityRegister],
+            identity[DddUsbProtocol::RegisterMapVersionRegister], identity[DddUsbProtocol::ImageRoleRegister]))
+        {
+            Log().Error("SendConfigurationCommand(): Unsupported or recovery FPGA image (identity {0}, map {1}, role {2})",
+                static_cast<unsigned int>(identity[DddUsbProtocol::IdentityRegister]),
+                static_cast<unsigned int>(identity[DddUsbProtocol::RegisterMapVersionRegister]),
+                static_cast<unsigned int>(identity[DddUsbProtocol::ImageRoleRegister]));
+            configuredDeviceProtocol = DddUsbProtocol::DeviceProtocol::Unsupported;
+            return false;
+        }
+
+        if ((identity[DddUsbProtocol::BuildFlagsRegister] & DddUsbProtocol::BuildCommitFlag) != 0)
+        {
+            for (uint8_t index = 0; index < DddUsbProtocol::CommitLength; ++index)
+            {
+                const uint8_t character = identity[DddUsbProtocol::CommitRegister + index];
+                const bool isHex = (character >= '0' && character <= '9') ||
+                    (character >= 'a' && character <= 'f') ||
+                    (character >= 'A' && character <= 'F');
+                if (!isHex)
+                    break;
+                configuredGatewareVersion.push_back(static_cast<char>(character));
+            }
+            if (!configuredGatewareVersion.empty() &&
+                (identity[DddUsbProtocol::BuildFlagsRegister] & DddUsbProtocol::BuildDirtyFlag) != 0)
+            {
+                configuredGatewareVersion += "-dirty";
+            }
+        }
+
+        // Once a configuration write has been attempted, any later failure can leave
+        // the gateware in test or half-rate mode even though capture never starts.
+        // Restore the least surprising safe state on every partial-configuration path.
+        const auto restoreSafeDefaults = [&]()
+        {
+            const bool testModeReset = SendVendorSpecificCommand(targetDevicePath,
+                DddUsbProtocol::RegisterWriteRequest, DddUsbProtocol::MakeTestModeWrite(false));
+            const bool sampleRateReset = SendVendorSpecificCommand(targetDevicePath,
+                DddUsbProtocol::RegisterWriteRequest,
+                DddUsbProtocol::MakeDecimationWrite(DddUsbProtocol::FullRateDecimation));
+            std::vector<uint8_t> testModeReadback;
+            std::vector<uint8_t> sampleRateReadback;
+            const bool resetVerified = testModeReset && sampleRateReset &&
+                ReadDeviceRegisters(targetDevicePath, DddUsbProtocol::TestModeRegister, 1,
+                    testModeReadback) && testModeReadback.size() == 1 && testModeReadback[0] == 0 &&
+                ReadDeviceRegisters(targetDevicePath, DddUsbProtocol::DecimationRegister, 1,
+                    sampleRateReadback) && sampleRateReadback.size() == 1 &&
+                sampleRateReadback[0] == DddUsbProtocol::FullRateDecimation;
+            if (!resetVerified)
+            {
+                Log().Warning("SendConfigurationCommand(): Could not verify safe device defaults after a configuration error");
+            }
+        };
+        if (!SendVendorSpecificCommand(targetDevicePath, DddUsbProtocol::RegisterWriteRequest,
+            DddUsbProtocol::MakeTestModeWrite(testMode)))
+        {
+            Log().Error("SendConfigurationCommand(): Firmware 3.1 rejected the test-mode register write");
+            restoreSafeDefaults();
+            configuredDeviceProtocol = DddUsbProtocol::DeviceProtocol::Unsupported;
+            return false;
+        }
+        if (!SendVendorSpecificCommand(targetDevicePath, DddUsbProtocol::RegisterWriteRequest,
+            DddUsbProtocol::MakeDecimationWrite(decimationFactor)))
+        {
+            Log().Error("SendConfigurationCommand(): Firmware 3.1 rejected the sample-rate register write");
+            restoreSafeDefaults();
+            configuredDeviceProtocol = DddUsbProtocol::DeviceProtocol::Unsupported;
+            return false;
+        }
+
+        // The gateware normalises unsupported values, so a successful control transfer is
+        // not proof that the requested capture path took effect. Read both settings back
+        // before B5 or the bulk endpoint is opened.
+        std::vector<uint8_t> readback;
+        const uint8_t expectedTestMode = testMode ? 1 : 0;
+        if (!ReadDeviceRegisters(targetDevicePath, DddUsbProtocol::TestModeRegister, 1, readback) ||
+            readback.size() != 1 || readback[0] != expectedTestMode)
+        {
+            Log().Error("SendConfigurationCommand(): Firmware 3.1 test-mode readback did not match {0}",
+                static_cast<unsigned int>(expectedTestMode));
+            restoreSafeDefaults();
+            configuredDeviceProtocol = DddUsbProtocol::DeviceProtocol::Unsupported;
+            return false;
+        }
+        readback.clear();
+        if (!ReadDeviceRegisters(targetDevicePath, DddUsbProtocol::DecimationRegister, 1, readback) ||
+            readback.size() != 1 || readback[0] != decimationFactor)
+        {
+            Log().Error("SendConfigurationCommand(): Firmware 3.1 decimation readback did not match {0}",
+                static_cast<unsigned int>(decimationFactor));
+            restoreSafeDefaults();
+            configuredDeviceProtocol = DddUsbProtocol::DeviceProtocol::Unsupported;
+            return false;
+        }
+
+        configuredDeviceProtocol = protocol;
+        return true;
+    }
+    case DddUsbProtocol::DeviceProtocol::Unsupported:
+        Log().Error("SendConfigurationCommand(): The selected device uses an unsupported USB protocol version");
+        configuredDeviceProtocol = DddUsbProtocol::DeviceProtocol::Unsupported;
+        return false;
+    }
+
+    return false;
 }
 
 //----------------------------------------------------------------------------------------------------------------------
 // Capture methods
 //----------------------------------------------------------------------------------------------------------------------
-bool UsbDeviceBase::StartCapture(const std::filesystem::path& filePath, CaptureFormat format, const std::string& preferredDevicePath, bool isTestMode, bool useSmallUsbTransfers, bool useAsyncFileIo, size_t usbTransferQueueSizeInBytes, size_t diskBufferQueueSizeInBytes, int flacCompressionLevel, int flacOutputSampleRateInHz)
+bool UsbDeviceBase::StartCapture(const std::filesystem::path& filePath, CaptureFormat format,
+    const std::string& preferredDevicePath, bool isTestMode, bool useSmallUsbTransfers,
+    bool useAsyncFileIo, size_t usbTransferQueueSizeInBytes,
+    size_t diskBufferQueueSizeInBytes, int flacCompressionLevel,
+    uint8_t decimationFactor, uint8_t frontEndGainSwitches)
 {
     // If we're already performing a capture, abort any further processing.
     if (transferInProgress)
@@ -155,8 +498,163 @@ bool UsbDeviceBase::StartCapture(const std::filesystem::path& filePath, CaptureF
         return false;
     }
 
+    // Resolve the selected physical path once and keep using it for every control request
+    // and the streaming connection. If it disappears, fail instead of falling through to
+    // another attached Duplicator part-way through the start sequence.
+    std::string targetDevicePath;
+    if (!ResolveTargetDevicePath(preferredDevicePath, targetDevicePath))
+    {
+        Log().Error("StartCapture(): Failed to locate the target device");
+        captureResult = TransferResult::ConnectionFailure;
+        return false;
+    }
+
+    // Configure the selected device immediately before capture. Legacy firmware uses the
+    // original 0xB6 bit field; firmware 3.1 uses the protocol-v1 register write request.
+    if (!SendConfigurationCommandToDevice(targetDevicePath, isTestMode, decimationFactor))
+    {
+        Log().Error("StartCapture(): Failed to configure the target device");
+        captureResult = TransferResult::DeviceConfigurationError;
+        return false;
+    }
+
+    // Protocol-v1 firmware uses 0xB5 to keep the USB 3 link out of U1/U2 while capture is
+    // active. Without this, Windows can lose samples inside otherwise complete transfers.
+    bool collectionStarted = false;
+    if (configuredDeviceProtocol == DddUsbProtocol::DeviceProtocol::Version1)
+    {
+        if (!SendVendorSpecificCommand(targetDevicePath, DddUsbProtocol::CollectionRequest, 1))
+        {
+            Log().Error("StartCapture(): The target device rejected the collection start request");
+            // A failed host-side transfer is ambiguous: the firmware may already have
+            // acted on B5=1. B5=0 is idempotent, so always issue the compensating stop.
+            SendVendorSpecificCommand(targetDevicePath, DddUsbProtocol::CollectionRequest, 0);
+            SendConfigurationCommandToDevice(targetDevicePath, false,
+                DddUsbProtocol::FullRateDecimation);
+            captureResult = TransferResult::ConnectionFailure;
+            return false;
+        }
+        collectionStarted = true;
+    }
+
+    // Any failure below must undo the protocol-v1 collection state. The existing capture
+    // connection is closed first so the stop request can open the selected device cleanly.
+    bool captureStartCommitted = false;
+    std::shared_ptr<void> failedStartCleanup(nullptr,
+        [&](void*)
+        {
+            if (captureStartCommitted)
+            {
+                return;
+            }
+
+            // An exception or late startup failure after flac was launched must
+            // not leave a child process, inherited pipe, or joinable reader thread.
+#ifdef _WIN32
+            if (flacPipeHandle != nullptr)
+            {
+                flacStdinWriteHandle = INVALID_HANDLE_VALUE;
+                fclose(flacPipeHandle);
+                flacPipeHandle = nullptr;
+            }
+            bool flacProcessExited = true;
+            if (flacPipeProcess != INVALID_HANDLE_VALUE)
+            {
+                flacProcessExited = WaitForSingleObject(flacPipeProcess, 5000) == WAIT_OBJECT_0;
+                if (!flacProcessExited)
+                {
+                    TerminateProcess(flacPipeProcess, 1);
+                    flacProcessExited = WaitForSingleObject(flacPipeProcess, 5000) == WAIT_OBJECT_0;
+                }
+                if (!flacProcessExited && flacErrorReaderThread.joinable())
+                {
+                    flacErrorReaderStopRequested = true;
+                    const HANDLE readerThreadHandle = flacErrorReaderThreadHandle.load();
+                    if (readerThreadHandle != nullptr)
+                    {
+                        CancelSynchronousIo(readerThreadHandle);
+                    }
+                }
+                CloseHandle(flacPipeProcess);
+                flacPipeProcess = INVALID_HANDLE_VALUE;
+            }
+            if (flacErrorReaderThread.joinable())
+            {
+                flacErrorReaderThread.join();
+            }
+            if (const HANDLE readerThreadHandle =
+                    flacErrorReaderThreadHandle.exchange(nullptr);
+                readerThreadHandle != nullptr)
+            {
+                CloseHandle(readerThreadHandle);
+            }
+            if (flacErrorReadPipeHandle != INVALID_HANDLE_VALUE)
+            {
+                CloseHandle(flacErrorReadPipeHandle);
+                flacErrorReadPipeHandle = INVALID_HANDLE_VALUE;
+            }
+            if (windowsCaptureOutputFileHandle != INVALID_HANDLE_VALUE)
+            {
+                CloseHandle(windowsCaptureOutputFileHandle);
+                windowsCaptureOutputFileHandle = INVALID_HANDLE_VALUE;
+            }
+#else
+            if (flacPipeHandle != nullptr)
+            {
+                fclose(flacPipeHandle);
+                flacPipeHandle = nullptr;
+            }
+            if (flacPipeProcessId > 0)
+            {
+                int processStatus = 0;
+                if (!waitForFlacProcess(static_cast<pid_t>(flacPipeProcessId), 5000,
+                    processStatus))
+                {
+                    terminateFlacProcess(static_cast<pid_t>(flacPipeProcessId),
+                        processStatus);
+                }
+                flacPipeProcessId = -1;
+            }
+#endif
+            if (captureOutputFile.is_open())
+            {
+                captureOutputFile.close();
+            }
+            if (format == CaptureFormat::Signed16BitFlacOnTheFly)
+            {
+                std::error_code removeError;
+                std::filesystem::remove(filePath, removeError);
+            }
+            if (DeviceConnected())
+            {
+                DisconnectFromDevice();
+            }
+            if (collectionStarted)
+            {
+                SendVendorSpecificCommand(targetDevicePath, DddUsbProtocol::CollectionRequest, 0);
+            }
+            SendConfigurationCommandToDevice(targetDevicePath, false,
+                DddUsbProtocol::FullRateDecimation);
+#ifdef _WIN32
+            if (useWindowsOverlappedFileIo && diskBufferEntries)
+            {
+                for (size_t index = 0; index < totalDiskBufferEntryCount; ++index)
+                {
+                    HANDLE eventHandle = diskBufferEntries[index].diskWriteOverlappedBuffer.hEvent;
+                    if (eventHandle != nullptr && eventHandle != INVALID_HANDLE_VALUE)
+                    {
+                        CloseHandle(eventHandle);
+                        diskBufferEntries[index].diskWriteOverlappedBuffer.hEvent = nullptr;
+                    }
+                }
+            }
+#endif
+            diskBufferEntries.reset();
+            transferInProgress = false;
+        });
+
     // Attempt to connect to the target device
-    if (!ConnectToDevice(preferredDevicePath))
+    if (!ConnectToDevice(targetDevicePath))
     {
         Log().Error("StartCapture(): Failed to connect to the target device");
         captureResult = TransferResult::ConnectionFailure;
@@ -171,62 +669,174 @@ bool UsbDeviceBase::StartCapture(const std::filesystem::path& filePath, CaptureF
     // Attempt to create/open the output file or pipe
     if (format == CaptureFormat::Signed16BitFlacOnTheFly)
     {
-        // Open an on-the-fly pipe: ffmpeg (s16le 40MSPS) → resample → u8 → flac → our stdout reader → file
-        // flacOutputSampleRateInHz is the real target rate in Hz (e.g. 20,000,000).
-        // ffmpeg's aresample filter needs the actual Hz value.
-        // The FLAC header stores the rate in the ld-decode/vhs-decode kHz convention
-        // (e.g. 20000 meaning 20 MHz), so we divide by 1000 only for the flac argument.
-        int ffmpegResampleRate = flacOutputSampleRateInHz;
-        int flacSampleRate     = flacOutputSampleRateInHz / 1000;
-        int level = (flacCompressionLevel >= 0 && flacCompressionLevel <= 8) ? flacCompressionLevel : 8;
+        // Firmware 3.1 has already performed any requested 2:1 half-band decimation.
+        // Feed the exact signed-16 mapping directly to native FLAC: no host resampling
+        // and no 8-bit conversion. flac owns the target file so it can seek back at EOF
+        // and finalise STREAMINFO (sample count and MD5).
+        const int level = std::clamp(flacCompressionLevel, 0, 8);
+        const unsigned int flacThreads = std::clamp(std::thread::hardware_concurrency(), 1U, 8U);
+        const uint32_t realSampleRate = DddUsbProtocol::SampleRateInHzForDecimation(decimationFactor);
+        const uint32_t flacSampleRate = DddUsbProtocol::FlacSampleRateLabelForDecimation(decimationFactor);
+        const uint8_t declaredGain = DddFrontEndGain::NormalizeSwitchPattern(frontEndGainSwitches);
+        const std::string gainDescription = DddFrontEndGain::Description(declaredGain);
 
-        // Look for ffmpeg/flac next to our own exe first, then fall back to PATH.
-        // Use wide strings (GetModuleFileNameW + CreateProcessW) so non-ASCII characters
-        // in the install path (e.g. accented folder names) are handled correctly.
 #ifdef _WIN32
-        // On Windows, open the output file ourselves; a background reader thread captures
-        // flac's stdout pipe and writes compressed FLAC bytes here.
-        captureOutputFile.clear();
-        captureOutputFile.open(filePath, std::ios::out | std::ios::trunc | std::ios::binary);
-        if (!captureOutputFile.is_open())
         {
-            Log().Error("StartCapture(): Failed to create the FLAC output file at path {0}", filePath);
-            captureResult = TransferResult::FileCreationError;
-            return false;
-        }
-        {
-            std::wstring ffmpegCmdW = L"ffmpeg";
-            std::wstring flacCmdW   = L"flac";
+            std::wstring flacExecutable = L"flac.exe";
             wchar_t wExePath[MAX_PATH] = {};
             GetModuleFileNameW(NULL, wExePath, MAX_PATH);
             std::wstring exeDirW(wExePath);
             auto lastSlash = exeDirW.find_last_of(L"\\/");
             exeDirW = (lastSlash != std::wstring::npos) ? exeDirW.substr(0, lastSlash + 1) : L"";
-            std::wstring ffmpegLocalW = exeDirW + L"ffmpeg.exe";
-            std::wstring flacLocalW   = exeDirW + L"flac.exe";
-            if (std::filesystem::exists(ffmpegLocalW)) ffmpegCmdW = L"\"" + ffmpegLocalW + L"\"";
-            if (std::filesystem::exists(flacLocalW))   flacCmdW   = L"\"" + flacLocalW   + L"\"";
+            const std::wstring localFlac = exeDirW + L"flac.exe";
+            if (std::filesystem::exists(localFlac))
+            {
+                flacExecutable = localFlac;
+            }
+            else
+            {
+                // CreateProcessW does not search PATH when a relative executable is
+                // supplied as lpApplicationName. Resolve it first so installed flac.exe
+                // distributions work even when the binary is not bundled beside us.
+                std::vector<wchar_t> resolvedPath(32768);
+                const DWORD resolvedLength = SearchPathW(nullptr, L"flac.exe", nullptr,
+                    static_cast<DWORD>(resolvedPath.size()), resolvedPath.data(), nullptr);
+                if (resolvedLength > 0 && resolvedLength < resolvedPath.size())
+                {
+                    flacExecutable.assign(resolvedPath.data(), resolvedLength);
+                }
+            }
 
-            // flac writes to stdout (-c), which we capture via the stdout pipe
-            std::wstring cmd = ffmpegCmdW + L" -hide_banner -loglevel error -f s16le -ar 40000000 -ac 1 -i pipe:0 "
-                + L"-af aresample=" + std::to_wstring(ffmpegResampleRate) + L":resampler=soxr:precision=28 "
-                + L"-sample_fmt u8 -f u8 - | "
-                + flacCmdW + L" -" + std::to_wstring(level) + L" --bps=8 --sign=unsigned --channels=1 --endian=little "
-                + L"--sample-rate=" + std::to_wstring(flacSampleRate) + L" "
-                + L"--no-seektable --force-raw-format -f -c -";
-            Log().Info(std::wstring(L"StartCapture(): FLAC pipe command: ") + cmd);
-            flacPipeHandle = openPipeNoWindow(cmd, flacPipeProcess, flacReadPipeHandle);
+            std::wstring arguments = L"-" + std::to_wstring(level)
+                + L" -j " + std::to_wstring(flacThreads)
+                + L" --bps=16 --sign=signed --channels=1 --endian=little"
+                + L" --sample-rate=" + std::to_wstring(flacSampleRate)
+                + L" --no-seektable --force-raw-format -f"
+                + L" --tag=ENCODER=DomesdayDuplicator-2.1"
+                + L" --tag=DDD_VERSION=2.1"
+                + L" --tag=DDD_SAMPLE_RATE_HZ=" + std::to_wstring(realSampleRate)
+                + L" --tag=DDD_DECIMATION=" + std::to_wstring(decimationFactor)
+                + L" --tag=DDD_TEST_MODE=" + std::wstring(isTestMode ? L"true" : L"false");
+            if (!configuredGatewareVersion.empty())
+            {
+                arguments += L" --tag=DDD_GATEWARE_VERSION=" +
+                    std::wstring(configuredGatewareVersion.begin(), configuredGatewareVersion.end());
+            }
+            if (!gainDescription.empty())
+            {
+                arguments += L" --tag=\"DDD_FRONT_END_GAIN=" +
+                    utf8ToWide(gainDescription) + L"\"";
+            }
+            arguments += L" -o \"" + filePath.wstring() + L"\" -";
+
+            Log().Info("StartCapture(): Starting native signed-16 FLAC encoder");
+            flacErrorOutput.clear();
+            flacErrorReaderStopRequested = false;
+            flacErrorReaderThreadHandle = nullptr;
+            flacPipeHandle = openFlacPipeNoWindow(flacExecutable, arguments,
+                flacPipeProcess, flacErrorReadPipeHandle);
             // Store the raw HANDLE so ProcessingThread can use WriteFile directly,
             // bypassing the MinGW CRT which may call abort() on a broken pipe.
             if (flacPipeHandle != nullptr)
+            {
                 flacStdinWriteHandle = reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(flacPipeHandle)));
+                flacErrorReaderThread = std::thread([this]() {
+                    // std::thread::native_handle() is a Win32 HANDLE under MSVC but a
+                    // pthread identifier under MinGW. Duplicate the current pseudo-handle
+                    // into a real Win32 thread HANDLE that CancelSynchronousIo accepts on
+                    // both supported Windows toolchains.
+                    HANDLE readerThreadHandle = nullptr;
+                    if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(),
+                        GetCurrentProcess(), &readerThreadHandle, THREAD_TERMINATE,
+                        FALSE, 0))
+                    {
+                        Log().Warning("StartCapture(): Could not create a cancellable FLAC diagnostic-reader handle");
+                    }
+                    flacErrorReaderThreadHandle = readerThreadHandle;
+
+                    const DWORD bufferSize = 4096;
+                    std::vector<char> buffer(bufferSize);
+                    DWORD bytesRead = 0;
+                    while (!flacErrorReaderStopRequested &&
+                        ReadFile(flacErrorReadPipeHandle, buffer.data(), bufferSize,
+                        &bytesRead, nullptr) && bytesRead > 0)
+                    {
+                        constexpr size_t maximumDiagnosticBytes = 256 * 1024;
+                        flacErrorOutput.append(buffer.data(), bytesRead);
+                        if (flacErrorOutput.size() > maximumDiagnosticBytes)
+                        {
+                            flacErrorOutput.erase(0,
+                                flacErrorOutput.size() - maximumDiagnosticBytes);
+                        }
+                    }
+                });
+
+                // flac 1.5 is required for -j. Bad options and unwritable output
+                // paths cause the child to exit immediately; detect that before USB
+                // capture threads start so the device can be cleanly rolled back.
+                const DWORD startupWait = WaitForSingleObject(flacPipeProcess, 150);
+                if (startupWait == WAIT_OBJECT_0 || startupWait == WAIT_FAILED)
+                {
+                    const DWORD waitError = startupWait == WAIT_FAILED ? GetLastError() : ERROR_SUCCESS;
+                    flacStdinWriteHandle = INVALID_HANDLE_VALUE;
+                    fclose(flacPipeHandle);
+                    flacPipeHandle = nullptr;
+                    if (startupWait == WAIT_FAILED)
+                    {
+                        TerminateProcess(flacPipeProcess, 1);
+                        if (WaitForSingleObject(flacPipeProcess, 5000) != WAIT_OBJECT_0 &&
+                            flacErrorReaderThread.joinable())
+                        {
+                            flacErrorReaderStopRequested = true;
+                            const HANDLE readerThreadHandle = flacErrorReaderThreadHandle.load();
+                            if (readerThreadHandle != nullptr)
+                            {
+                                CancelSynchronousIo(readerThreadHandle);
+                            }
+                        }
+                    }
+                    DWORD exitCode = 1;
+                    GetExitCodeProcess(flacPipeProcess, &exitCode);
+                    CloseHandle(flacPipeProcess);
+                    flacPipeProcess = INVALID_HANDLE_VALUE;
+                    if (flacErrorReaderThread.joinable())
+                    {
+                        flacErrorReaderThread.join();
+                    }
+                    if (const HANDLE readerThreadHandle =
+                            flacErrorReaderThreadHandle.exchange(nullptr);
+                        readerThreadHandle != nullptr)
+                    {
+                        CloseHandle(readerThreadHandle);
+                    }
+                    if (flacErrorReadPipeHandle != INVALID_HANDLE_VALUE)
+                    {
+                        CloseHandle(flacErrorReadPipeHandle);
+                        flacErrorReadPipeHandle = INVALID_HANDLE_VALUE;
+                    }
+                    if (!flacErrorOutput.empty())
+                    {
+                        Log().Error(std::string("FLAC encoder startup output: ") + flacErrorOutput);
+                    }
+                    if (startupWait == WAIT_FAILED)
+                    {
+                        Log().Error("StartCapture(): Failed while checking the FLAC encoder process (error {0})",
+                            waitError);
+                    }
+                    else
+                    {
+                        Log().Error("StartCapture(): FLAC encoder exited during startup with code {0}", exitCode);
+                    }
+                    captureResult = TransferResult::FileCreationError;
+                    return false;
+                }
+            }
         }
 #else
         {
-            std::string ffmpegCmd = "ffmpeg";
             std::string flacCmd   = "flac";
 #ifdef __APPLE__
-            // On macOS, look for ffmpeg/flac next to our own executable first.
+            // On macOS, look for flac next to our own executable first.
             // When running from an .app bundle they live in Contents/MacOS/ next to the main binary.
             {
                 char execPath[4096] = {};
@@ -234,17 +844,13 @@ bool UsbDeviceBase::StartCapture(const std::filesystem::path& filePath, CaptureF
                 if (_NSGetExecutablePath(execPath, &pathSize) == 0)
                 {
                     std::filesystem::path execDir = std::filesystem::path(execPath).parent_path();
-                    std::filesystem::path ffmpegLocal = execDir / "ffmpeg";
                     std::filesystem::path flacLocal   = execDir / "flac";
-                    if (std::filesystem::exists(ffmpegLocal)) ffmpegCmd = "\"" + ffmpegLocal.string() + "\"";
                     if (std::filesystem::exists(flacLocal))   flacCmd   = "\"" + flacLocal.string() + "\"";
                 }
             }
 #endif
-            // On non-Windows, popen("w") only gives us a pipe to the command's stdin;
-            // the command's stdout goes to the process stdout, which is silently discarded
-            // in an .app bundle. Instead of "-c -" (stdout), pass "-o path" so flac writes
-            // directly to the output file without needing a reader thread.
+            // On non-Windows the managed child pipe only carries command stdin.
+            // Pass "-o path" so flac writes and finalises the target file directly.
             // Shell-quote the path: wrap in single quotes, escaping embedded single quotes
             // as '\'' (close-quote, escaped-quote, re-open-quote) — handles all filenames.
             std::string quotedOutputPath = "'";
@@ -254,57 +860,59 @@ bool UsbDeviceBase::StartCapture(const std::filesystem::path& filePath, CaptureF
             }
             quotedOutputPath += "'";
 
-            // On macOS use the built-in SWR resampler to avoid a libsoxr dylib loading
-            // issue when ffmpeg is launched as a child process from the app bundle.
-            std::string cmd = ffmpegCmd + " -hide_banner -loglevel error -f s16le -ar 40000000 -ac 1 -i pipe:0 "
-                + "-af aresample=" + std::to_string(ffmpegResampleRate) + ":resampler=soxr:precision=28 "
-                + "-sample_fmt u8 -f u8 - "
-                + "2>/tmp/ddd_ffmpeg_err.log | "
-                + flacCmd + " -" + std::to_string(level) + " --bps=8 --sign=unsigned --channels=1 --endian=little "
+            std::string cmd = flacCmd + " -" + std::to_string(level)
+                + " -j " + std::to_string(flacThreads)
+                + " --bps=16 --sign=signed --channels=1 --endian=little "
                 + "--sample-rate=" + std::to_string(flacSampleRate) + " "
-                + "--no-seektable --force-raw-format -f - -o " + quotedOutputPath
-                + " 2>/tmp/ddd_flac_err.log";
-            Log().Info(std::string("StartCapture(): FLAC pipe command: ") + cmd);
-            flacPipeHandle = popen(cmd.c_str(), "w");
+                + "--no-seektable --force-raw-format -f "
+                + "--tag='ENCODER=DomesdayDuplicator-2.1' "
+                + "--tag='DDD_VERSION=2.1' "
+                + "--tag='DDD_SAMPLE_RATE_HZ=" + std::to_string(realSampleRate) + "' "
+                + "--tag='DDD_DECIMATION=" + std::to_string(decimationFactor) + "' "
+                + "--tag='DDD_TEST_MODE=" + std::string(isTestMode ? "true" : "false") + "' ";
+            if (!configuredGatewareVersion.empty())
+            {
+                cmd += "--tag='DDD_GATEWARE_VERSION=" + configuredGatewareVersion + "' ";
+            }
+            if (!gainDescription.empty())
+            {
+                cmd += "--tag='DDD_FRONT_END_GAIN=" + gainDescription + "' ";
+            }
+            cmd += "-o " + quotedOutputPath + " -";
+            Log().Info("StartCapture(): Starting native signed-16 FLAC encoder");
+            flacPipeHandle = openFlacPipeProcess(cmd, flacPipeProcessId);
+            if (flacPipeHandle != nullptr)
+            {
+                // fork()/exec is asynchronous. Catch a missing/incompatible encoder or
+                // an immediately rejected output path before capture threads are started.
+                int startupStatus = 0;
+                if (waitForFlacProcess(static_cast<pid_t>(flacPipeProcessId), 150,
+                    startupStatus))
+                {
+                    fclose(flacPipeHandle);
+                    flacPipeHandle = nullptr;
+                    flacPipeProcessId = -1;
+                    if (WIFEXITED(startupStatus))
+                    {
+                        Log().Error("StartCapture(): FLAC encoder exited during startup with code {0}",
+                            WEXITSTATUS(startupStatus));
+                    }
+                    else
+                    {
+                        Log().Error("StartCapture(): FLAC encoder terminated during startup");
+                    }
+                    captureResult = TransferResult::FileCreationError;
+                    return false;
+                }
+            }
         }
 #endif
         if (flacPipeHandle == nullptr)
         {
             Log().Error("StartCapture(): Failed to open FLAC pipe");
-#ifdef _WIN32
-            captureOutputFile.close();
-#endif
             captureResult = TransferResult::FileCreationError;
             return false;
         }
-
-
-#ifdef _WIN32
-        // Start a background thread that reads flac's stdout and writes to the output file,
-        // so GetFileSizeWrittenInBytes() returns the actual compressed FLAC bytes in real time.
-        flacReaderThread = std::thread([this]() {
-            try
-            {
-                const DWORD bufSize = 65536;
-                std::vector<char> buf(bufSize);
-                DWORD bytesRead;
-                while (ReadFile(flacReadPipeHandle, buf.data(), bufSize, &bytesRead, NULL) && bytesRead > 0)
-                {
-                    captureOutputFile.write(buf.data(), static_cast<std::streamsize>(bytesRead));
-                    transferFileSizeWrittenInBytes += bytesRead;
-                }
-                captureOutputFile.flush();
-            }
-            catch (const std::exception& e)
-            {
-                Log().Error("flacReaderThread: Unhandled exception: {0}", e.what());
-            }
-            catch (...)
-            {
-                Log().Error("flacReaderThread: Unknown unhandled exception");
-            }
-        });
-#endif
     }
     else
     {
@@ -368,27 +976,48 @@ bool UsbDeviceBase::StartCapture(const std::filesystem::path& filePath, CaptureF
     // Calculate the optimal read buffer size and number of disk buffers, and initialize the structures. We use an
     // unusual case of wrapping an array new into a unique_ptr rather than std::vector here, as we have an atomic_flag
     // member in the structure which can't be moved.
-    CalculateDesiredBufferCountAndSize(useSmallUsbTransfers, usbTransferQueueSizeInBytes, diskBufferQueueSizeInBytes, totalDiskBufferEntryCount, diskBufferSizeInBytes);
-    diskBufferEntries.reset(new DiskBufferEntry[totalDiskBufferEntryCount]);
-    for (size_t i = 0; i < totalDiskBufferEntryCount; ++i)
+    try
     {
-        DiskBufferEntry& entry = diskBufferEntries[i];
-        entry.readBuffer.resize(diskBufferSizeInBytes);
-        entry.isDiskBufferFull.clear();
-#ifdef _WIN32
-        entry.diskWriteInProgress = false;
-        if (useWindowsOverlappedFileIo)
+        CalculateDesiredBufferCountAndSize(useSmallUsbTransfers, usbTransferQueueSizeInBytes,
+            diskBufferQueueSizeInBytes, totalDiskBufferEntryCount, diskBufferSizeInBytes);
+        diskBufferEntries.reset(new DiskBufferEntry[totalDiskBufferEntryCount]);
+        for (size_t i = 0; i < totalDiskBufferEntryCount; ++i)
         {
-            entry.diskWriteOverlappedBuffer = {};
-            entry.diskWriteOverlappedBuffer.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
-        }
+            DiskBufferEntry& entry = diskBufferEntries[i];
+            entry.readBuffer.resize(diskBufferSizeInBytes);
+            entry.isDiskBufferFull.clear();
+#ifdef _WIN32
+            entry.diskWriteInProgress = false;
+            if (useWindowsOverlappedFileIo)
+            {
+                entry.diskWriteOverlappedBuffer = {};
+                entry.diskWriteOverlappedBuffer.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+                if (entry.diskWriteOverlappedBuffer.hEvent == nullptr)
+                    throw std::runtime_error("CreateEventW failed for a disk buffer");
+            }
 #endif
+        }
+    }
+    catch (const std::bad_alloc&)
+    {
+        Log().Error("StartCapture(): Not enough memory for the configured capture buffers");
+        captureResult = TransferResult::UsbMemoryLimit;
+        return false;
+    }
+    catch (const std::exception& exception)
+    {
+        Log().Error("StartCapture(): Failed to initialize capture buffers: {0}", exception.what());
+        captureResult = TransferResult::ProgramError;
+        return false;
     }
 
     // Record the capture settings
     captureFilePath = filePath;
     captureFormat = format;
     captureIsTestMode = isTestMode;
+    currentHardwareDecimationFactor = decimationFactor;
+    currentCaptureSampleRateInHz = DddUsbProtocol::SampleRateInHzForDecimation(decimationFactor);
+    captureFrontEndGainSwitches = DddFrontEndGain::NormalizeSwitchPattern(frontEndGainSwitches);
     currentUsbTransferQueueSizeInBytes = usbTransferQueueSizeInBytes;
     currentUseSmallUsbTransfers = useSmallUsbTransfers;
 
@@ -412,9 +1041,24 @@ bool UsbDeviceBase::StartCapture(const std::filesystem::path& filePath, CaptureF
     expectedNextTestDataValue.reset();
     testDataMax.reset();
 
+    capturePreferredDevicePath = targetDevicePath;
+    currentFirmwareCollectionActive = collectionStarted;
+
     // Spin up a thread to handle the execution of the capture process from here on
-    std::thread captureThread(std::bind(std::mem_fn(&UsbDeviceBase::CaptureThread), this));
-    captureThread.detach();
+    try
+    {
+        std::thread captureThread(std::bind(std::mem_fn(&UsbDeviceBase::CaptureThread), this));
+        captureThread.detach();
+    }
+    catch (const std::exception& exception)
+    {
+        Log().Error("StartCapture(): Failed to create the capture thread: {0}", exception.what());
+        captureResult = TransferResult::ProgramError;
+        captureThreadRunning.clear();
+        captureThreadRunning.notify_all();
+        return false;
+    }
+    captureStartCommitted = true;
     return true;
 }
 
@@ -431,7 +1075,57 @@ void UsbDeviceBase::StopCapture()
     // Instruct the capture thread to terminate, and wait for confirmation that it has stopped.
     captureThreadStopRequested.test_and_set();
     captureThreadStopRequested.notify_all();
+    std::mutex flacDrainMutex;
+    std::condition_variable flacDrainCondition;
+    bool captureThreadStopped = false;
+    std::thread flacDrainWatchdog;
+    bool flacProcessAvailable = false;
+#ifdef _WIN32
+    flacProcessAvailable = flacPipeProcess != INVALID_HANDLE_VALUE;
+#else
+    flacProcessAvailable = flacPipeProcessId > 0;
+#endif
+    if (captureFormat == CaptureFormat::Signed16BitFlacOnTheFly && flacProcessAvailable)
+    {
+        flacDrainWatchdog = std::thread([&]()
+        {
+            std::unique_lock<std::mutex> lock(flacDrainMutex);
+            if (!flacDrainCondition.wait_for(lock, std::chrono::seconds(30),
+                [&]() { return captureThreadStopped; }))
+            {
+                Log().Error("StopCapture(): Timed out draining samples into the FLAC encoder");
+#ifdef _WIN32
+                // If flac stopped reading, ProcessingThread may be blocked in a
+                // synchronous WriteFile. Killing the child closes the pipe's read end;
+                // CancelIoEx is a second unblocking path if process termination fails.
+                if (!TerminateProcess(flacPipeProcess, 1) && GetLastError() != ERROR_ACCESS_DENIED)
+                {
+                    Log().Error("StopCapture(): Failed to stop the stalled FLAC encoder (error {0})",
+                        GetLastError());
+                }
+                if (flacStdinWriteHandle != INVALID_HANDLE_VALUE)
+                {
+                    CancelIoEx(flacStdinWriteHandle, nullptr);
+                }
+#else
+                // Closing the encoder process group's read end turns a blocked fwrite
+                // into EPIPE. ProcessingThread blocks SIGPIPE so it reports FileWriteError
+                // instead of terminating the application.
+                signalFlacProcessGroup(static_cast<pid_t>(flacPipeProcessId), SIGKILL);
+#endif
+            }
+        });
+    }
     captureThreadRunning.wait(true);
+    {
+        std::lock_guard<std::mutex> lock(flacDrainMutex);
+        captureThreadStopped = true;
+    }
+    flacDrainCondition.notify_one();
+    if (flacDrainWatchdog.joinable())
+    {
+        flacDrainWatchdog.join();
+    }
 
     // Release our memory holding the disk buffers
 #ifdef _WIN32
@@ -449,32 +1143,145 @@ void UsbDeviceBase::StopCapture()
     // Close the output file or pipe
     if (captureFormat == CaptureFormat::Signed16BitFlacOnTheFly)
     {
+        bool encoderFinishedSuccessfully = true;
         if (flacPipeHandle != nullptr)
         {
 #ifdef _WIN32
-            // Close stdin pipe → ffmpeg gets EOF → flac gets EOF → flac closes stdout pipe
+            // Close stdin to deliver EOF. flac then finishes its last frame and seeks back
+            // to patch STREAMINFO before it exits.
             flacStdinWriteHandle = INVALID_HANDLE_VALUE; // fclose below closes the underlying HANDLE
-            fclose(flacPipeHandle);
+            if (fclose(flacPipeHandle) != 0)
+            {
+                encoderFinishedSuccessfully = false;
+            }
             flacPipeHandle = nullptr;
             if (flacPipeProcess != INVALID_HANDLE_VALUE)
             {
-                WaitForSingleObject(flacPipeProcess, INFINITE);
+                constexpr DWORD encoderFinishTimeoutInMs = 30000;
+                const DWORD waitResult = WaitForSingleObject(flacPipeProcess, encoderFinishTimeoutInMs);
+                bool processExited = waitResult == WAIT_OBJECT_0;
+                if (waitResult == WAIT_TIMEOUT)
+                {
+                    Log().Error("StopCapture(): FLAC encoder did not finish within 30 seconds");
+                    encoderFinishedSuccessfully = false;
+                }
+                else if (waitResult == WAIT_FAILED)
+                {
+                    Log().Error("StopCapture(): Failed while waiting for the FLAC encoder (error {0})",
+                        GetLastError());
+                    encoderFinishedSuccessfully = false;
+                }
+
+                if (!processExited)
+                {
+                    if (!TerminateProcess(flacPipeProcess, 1))
+                    {
+                        Log().Error("StopCapture(): Failed to terminate the FLAC encoder (error {0})",
+                            GetLastError());
+                    }
+                    const DWORD terminationWait = WaitForSingleObject(flacPipeProcess, 5000);
+                    processExited = terminationWait == WAIT_OBJECT_0;
+                    if (!processExited)
+                    {
+                        Log().Error("StopCapture(): FLAC encoder remained active after termination request");
+                        encoderFinishedSuccessfully = false;
+                        // The child may still own the diagnostic pipe's write end. Cancel
+                        // the reader's blocking ReadFile so joining it cannot hang forever.
+                        if (flacErrorReaderThread.joinable())
+                        {
+                            flacErrorReaderStopRequested = true;
+                            const HANDLE readerThreadHandle = flacErrorReaderThreadHandle.load();
+                            if (readerThreadHandle != nullptr)
+                            {
+                                CancelSynchronousIo(readerThreadHandle);
+                            }
+                        }
+                    }
+                }
+
+                DWORD exitCode = STILL_ACTIVE;
+                if (!GetExitCodeProcess(flacPipeProcess, &exitCode) ||
+                    exitCode == STILL_ACTIVE || exitCode != 0)
+                {
+                    Log().Error("StopCapture(): FLAC encoder exited with code {0}", exitCode);
+                    encoderFinishedSuccessfully = false;
+                }
                 CloseHandle(flacPipeProcess);
                 flacPipeProcess = INVALID_HANDLE_VALUE;
             }
-            // Drain any remaining bytes from flac stdout and close the file
-            if (flacReaderThread.joinable())
-                flacReaderThread.join();
-            if (flacReadPipeHandle != INVALID_HANDLE_VALUE)
+            if (flacErrorReaderThread.joinable())
             {
-                CloseHandle(flacReadPipeHandle);
-                flacReadPipeHandle = INVALID_HANDLE_VALUE;
+                flacErrorReaderThread.join();
             }
-            captureOutputFile.close();
+            if (const HANDLE readerThreadHandle =
+                    flacErrorReaderThreadHandle.exchange(nullptr);
+                readerThreadHandle != nullptr)
+            {
+                CloseHandle(readerThreadHandle);
+            }
+            if (flacErrorReadPipeHandle != INVALID_HANDLE_VALUE)
+            {
+                CloseHandle(flacErrorReadPipeHandle);
+                flacErrorReadPipeHandle = INVALID_HANDLE_VALUE;
+            }
+            if (!flacErrorOutput.empty())
+            {
+                if (encoderFinishedSuccessfully)
+                {
+                    Log().Debug(std::string("FLAC encoder output: ") + flacErrorOutput);
+                }
+                else
+                {
+                    Log().Error(std::string("FLAC encoder output: ") + flacErrorOutput);
+                }
+            }
 #else
-            pclose(flacPipeHandle);
+            if (fclose(flacPipeHandle) != 0)
+            {
+                Log().Error("StopCapture(): Failed to close the FLAC encoder input pipe");
+                encoderFinishedSuccessfully = false;
+            }
             flacPipeHandle = nullptr;
+            if (flacPipeProcessId > 0)
+            {
+                int encoderStatus = 0;
+                bool processExited = waitForFlacProcess(
+                    static_cast<pid_t>(flacPipeProcessId), 30000, encoderStatus);
+                if (!processExited)
+                {
+                    Log().Error("StopCapture(): FLAC encoder did not finish within 30 seconds");
+                    processExited = terminateFlacProcess(
+                        static_cast<pid_t>(flacPipeProcessId), encoderStatus);
+                }
+                if (!processExited || !WIFEXITED(encoderStatus) || WEXITSTATUS(encoderStatus) != 0)
+                {
+                    Log().Error("StopCapture(): FLAC encoder did not exit successfully");
+                    encoderFinishedSuccessfully = false;
+                }
+                flacPipeProcessId = -1;
+            }
 #endif
+        }
+
+        // A zero process exit is necessary but not sufficient: verify that the final file
+        // exists and is native FLAC rather than an empty/truncated output.
+        std::error_code fileSizeError;
+        const uintmax_t finalFileSize = std::filesystem::file_size(captureFilePath, fileSizeError);
+        if (!fileSizeError)
+        {
+            transferFileSizeWrittenInBytes = static_cast<size_t>(finalFileSize);
+        }
+        std::ifstream flacFile(captureFilePath, std::ios::in | std::ios::binary);
+        char flacMagic[4] = {};
+        flacFile.read(flacMagic, sizeof(flacMagic));
+        if (!flacFile || std::string(flacMagic, sizeof(flacMagic)) != "fLaC")
+        {
+            Log().Error("StopCapture(): FLAC encoder did not produce a valid native FLAC header");
+            encoderFinishedSuccessfully = false;
+        }
+        if (!encoderFinishedSuccessfully && captureResult == TransferResult::Success)
+        {
+            captureResult = TransferResult::FileWriteError;
         }
     }
     else
@@ -488,6 +1295,7 @@ void UsbDeviceBase::StopCapture()
                 DWORD lastError = GetLastError();
                 Log().Error("CloseHandle failed with error code {0}.", lastError);
             }
+            windowsCaptureOutputFileHandle = INVALID_HANDLE_VALUE;
         }
         else
         {
@@ -525,6 +1333,18 @@ void UsbDeviceBase::StopCapture()
     // Disconnect from the target device
     DisconnectFromDevice();
 
+    // Tell protocol-v1 firmware that capture is over only after the streaming handle has
+    // been released. This restores normal U1/U2 link power management on the device.
+    if (currentFirmwareCollectionActive)
+    {
+        if (!SendVendorSpecificCommand(capturePreferredDevicePath, DddUsbProtocol::CollectionRequest, 0))
+        {
+            Log().Warning("StopCapture(): Failed to send the collection stop request");
+        }
+        currentFirmwareCollectionActive = false;
+    }
+    capturePreferredDevicePath.clear();
+
     // Record that the capture process has completed
     Log().Info("StopCapture(): Ended capture process");
     transferInProgress = false;
@@ -557,7 +1377,7 @@ void UsbDeviceBase::CaptureThread()
         requiredConversionBufferSize = (diskBufferSizeInBytes / (8 * 4)) * 5;
         break;
     case CaptureFormat::Signed16BitFlacOnTheFly:
-        // Full s16le at 40MSPS is piped to ffmpeg which handles downsampling
+        // The FPGA-selected 20/40 MSPS stream is mapped losslessly to signed-16.
         requiredConversionBufferSize = diskBufferSizeInBytes;
         break;
     }
@@ -779,6 +1599,12 @@ bool UsbDeviceBase::GetTransferInProgress() const
 }
 
 //----------------------------------------------------------------------------------------------------------------------
+bool UsbDeviceBase::GetCaptureSessionOpen() const
+{
+    return transferInProgress;
+}
+
+//----------------------------------------------------------------------------------------------------------------------
 UsbDeviceBase::TransferResult UsbDeviceBase::GetTransferResult() const
 {
     return captureResult;
@@ -799,6 +1625,15 @@ size_t UsbDeviceBase::GetNumberOfDiskBuffersWritten() const
 //----------------------------------------------------------------------------------------------------------------------
 size_t UsbDeviceBase::GetFileSizeWrittenInBytes() const
 {
+    if (captureFormat == CaptureFormat::Signed16BitFlacOnTheFly && !captureFilePath.empty())
+    {
+        std::error_code error;
+        const uintmax_t size = std::filesystem::file_size(captureFilePath, error);
+        if (!error)
+        {
+            return static_cast<size_t>(size);
+        }
+    }
     return transferFileSizeWrittenInBytes;
 }
 
@@ -830,6 +1665,30 @@ size_t UsbDeviceBase::GetClippedMaxSampleCount() const
 bool UsbDeviceBase::GetTransferHadSequenceNumbers() const
 {
     return (sequenceState != SequenceState::Disabled);
+}
+
+//----------------------------------------------------------------------------------------------------------------------
+uint32_t UsbDeviceBase::GetCaptureSampleRateInHz() const
+{
+    return currentCaptureSampleRateInHz;
+}
+
+//----------------------------------------------------------------------------------------------------------------------
+uint8_t UsbDeviceBase::GetHardwareDecimationFactor() const
+{
+    return currentHardwareDecimationFactor;
+}
+
+//----------------------------------------------------------------------------------------------------------------------
+uint8_t UsbDeviceBase::GetCaptureFrontEndGainSwitches() const
+{
+    return captureFrontEndGainSwitches;
+}
+
+//----------------------------------------------------------------------------------------------------------------------
+const std::string& UsbDeviceBase::GetGatewareVersion() const
+{
+    return configuredGatewareVersion;
 }
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -908,6 +1767,18 @@ void UsbDeviceBase::ProcessingThread()
 {
   try
   {
+#ifndef _WIN32
+    // A FLAC child that exits closes the pipe reader. Block SIGPIPE in this
+    // worker so fwrite returns EPIPE/short-write and the capture reports a
+    // recoverable FileWriteError instead of terminating the whole application.
+    sigset_t blockedSignals;
+    sigemptyset(&blockedSignals);
+    sigaddset(&blockedSignals, SIGPIPE);
+    if (pthread_sigmask(SIG_BLOCK, &blockedSignals, nullptr) != 0)
+    {
+        Log().Warning("ProcessingThread(): Could not block SIGPIPE");
+    }
+#endif
     ThreadPriorityRestoreInfo priorityRestoreInfo = {};
     bool boostedThreadPriority = SetCurrentThreadRealtimePriority(priorityRestoreInfo);
     std::shared_ptr<void> currentThreadPriorityReducer;
@@ -1007,7 +1878,7 @@ void UsbDeviceBase::ProcessingThread()
             if (captureFormat == CaptureFormat::Signed16BitFlacOnTheFly)
             {
 #ifdef _WIN32
-                // Write raw s16le data to the ffmpeg+flac pipe using WriteFile directly.
+                // Write native signed-16 little-endian data directly to flac using WriteFile.
                 // Avoids fwrite/MinGW CRT which can call abort() on a broken pipe.
                 if (flacStdinWriteHandle == INVALID_HANDLE_VALUE)
                 {
@@ -1019,9 +1890,17 @@ void UsbDeviceBase::ProcessingThread()
                 DWORD written = 0;
                 BOOL ok = WriteFile(flacStdinWriteHandle, currentConversionBuffer.data(),
                                     static_cast<DWORD>(currentConversionBuffer.size()), &written, NULL);
-                if (!ok || written != static_cast<DWORD>(currentConversionBuffer.size()))
+                if (!ok)
                 {
                     Log().Error("ProcessingThread(): Failed to write to FLAC pipe (WriteFile error {0})", GetLastError());
+                    SetProcessingFinished(TransferResult::FileWriteError);
+                    processingFailure = true;
+                    continue;
+                }
+                if (written != static_cast<DWORD>(currentConversionBuffer.size()))
+                {
+                    Log().Error("ProcessingThread(): Short write to FLAC pipe ({0} of {1} bytes)",
+                        written, currentConversionBuffer.size());
                     SetProcessingFinished(TransferResult::FileWriteError);
                     processingFailure = true;
                     continue;
@@ -1039,15 +1918,13 @@ void UsbDeviceBase::ProcessingThread()
                 bufferEntry.isDiskBufferFull.clear();
                 bufferEntry.isDiskBufferFull.notify_all();
                 ++transferBufferWrittenCount;
-#ifdef __APPLE__
-                // On macOS flac writes directly to the output file; poll its size so the GUI counter updates.
+                // flac owns and finalises the output file on every platform. Polling once per
+                // large disk buffer keeps the GUI counter current without touching the stream.
                 {
                     std::error_code ec;
                     auto sz = std::filesystem::file_size(captureFilePath, ec);
                     if (!ec) transferFileSizeWrittenInBytes = sz;
                 }
-#endif
-                // On Windows transferFileSizeWrittenInBytes is updated by the flac reader thread
             }
             else
             {
@@ -1437,7 +2314,7 @@ bool UsbDeviceBase::ConvertRawSampleData(size_t diskBufferIndex, CaptureFormat c
         || captureFormat == CaptureFormat::Signed16BitFlacOnTheFly)
     {
         // Translate the data in the disk buffer to scaled 16-bit signed data
-        // (For FlacOnTheFly, the full-rate s16le stream is piped to ffmpeg for downsampling)
+        // For FlacOnTheFly this exact stream is fed directly to the native FLAC encoder.
         for (size_t i = 0; i < readBufferSizeInBytes; i += 2)
         {
             // Get the original 10-bit unsigned value from the disk data buffer

@@ -28,14 +28,36 @@
 #include "configurationdialog.h"
 #include "ui_configurationdialog.h"
 #include "AudioResampler.h"
+#include "DddFrontEndGain.h"
+#include <algorithm>
 #include <QProcess>
 #include <QFile>
 #include <QFileInfo>
+#include <QCoreApplication>
+#include <QDir>
 #include <QRegularExpression>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QSizePolicy>
 #include <QDebug>
+#include <vector>
+
+namespace
+{
+QString flacProgramPath()
+{
+#ifdef _WIN32
+    const QString executableName = QStringLiteral("flac.exe");
+#else
+    const QString executableName = QStringLiteral("flac");
+#endif
+    const QString bundledPath =
+        QDir(QCoreApplication::applicationDirPath()).filePath(executableName);
+    if (QFileInfo(bundledPath).isFile())
+        return bundledPath;
+    return executableName;
+}
+}
 
 ConfigurationDialog::ConfigurationDialog(QWidget *parent) :
     QDialog(parent)
@@ -45,17 +67,53 @@ ConfigurationDialog::ConfigurationDialog(QWidget *parent) :
 
     // Build the captureFormatComboBox
     ui->captureFormatComboBox->clear();
-    ui->captureFormatComboBox->addItem("8-bit FLAC", Configuration::CaptureFormat::flacDirect);
+    ui->captureFormatComboBox->addItem("Native 16-bit FLAC (real-time)", Configuration::CaptureFormat::flacDirect);
     ui->captureFormatComboBox->addItem("16-bit Signed Raw", Configuration::CaptureFormat::sixteenBitSigned);
     ui->captureFormatComboBox->addItem("10-bit Packed Unsigned", Configuration::CaptureFormat::tenBitPacked);
-    
-    // sampleRateComboBox is populated dynamically in onCaptureFormatChanged()
+
+    // Firmware 3.1 performs the 20 MSPS filtering and 2:1 decimation in the
+    // FPGA.  This is a hardware capture-rate choice for every output format.
     ui->sampleRateComboBox->clear();
-    
+    ui->sampleRateComboBox->addItem("40 MSPS (LaserDisc / full bandwidth)", 40000);
+    ui->sampleRateComboBox->addItem("20 MSPS (tape / FPGA 2:1 decimation)", 20000);
+    const QString sampleRateToolTip = tr(
+            "Selects the DDD 3.1 hardware sample rate. 20 MSPS uses the FPGA "
+            "half-band filter and 2:1 decimator; it is not host-side resampling.");
+    ui->sampleRateLabel->setToolTip(sampleRateToolTip);
+    ui->sampleRateComboBox->setToolTip(sampleRateToolTip);
+
+    // SW401 is physical and cannot be read or moved by the application.  The
+    // setting records the observed switch position for calibration/metadata.
+    ui->frontEndGainComboBox->clear();
+    ui->frontEndGainComboBox->addItem(
+            tr("Not declared - levels remain in converter codes"),
+            static_cast<int>(DddFrontEndGain::UndeclaredSwitchPattern));
+
+    std::vector<int> gainPatterns;
+    gainPatterns.reserve(DddFrontEndGain::MaximumSwitchPattern);
+    for (int pattern = 1; pattern <= DddFrontEndGain::MaximumSwitchPattern; ++pattern)
+        gainPatterns.push_back(pattern);
+    std::sort(gainPatterns.begin(), gainPatterns.end(), [](int first, int second) {
+        return DddFrontEndGain::Gain(first) > DddFrontEndGain::Gain(second);
+    });
+
+    for (const int pattern : gainPatterns) {
+        ui->frontEndGainComboBox->addItem(
+                QString::fromUtf8(DddFrontEndGain::Description(pattern)),
+                pattern);
+    }
+
+    const QString gainToolTip = tr(
+            "This only declares the physical SW401 DIP-switch position for "
+            "calibration and capture metadata (1 = ON). Software cannot adjust "
+            "the hardware gain; move SW401 on the DDD board to change it.");
+    ui->frontEndGainLabel->setToolTip(gainToolTip);
+    ui->frontEndGainComboBox->setToolTip(gainToolTip);
+
     // Build the flacOutputFormatComboBox
     ui->flacOutputFormatComboBox->clear();
-    ui->flacOutputFormatComboBox->addItem(".flac - Direct FLAC", 0);
-    ui->flacOutputFormatComboBox->addItem(".ldf - ld-compress style", 1);
+    ui->flacOutputFormatComboBox->addItem(".flac - Native real-time FLAC", 0);
+    ui->flacOutputFormatComboBox->addItem(".ldf - Legacy post-capture compression", 1);
 
     // Build the flacCompressionLevelComboBox
     ui->flacCompressionLevelComboBox->clear();
@@ -64,10 +122,10 @@ ConfigurationDialog::ConfigurationDialog(QWidget *parent) :
     ui->flacCompressionLevelComboBox->addItem("2 - Fast", 2);
     ui->flacCompressionLevelComboBox->addItem("3 - Fast", 3);
     ui->flacCompressionLevelComboBox->addItem("4 - Fast", 4);
-    ui->flacCompressionLevelComboBox->addItem("5 - Default (balanced)", 5);
+    ui->flacCompressionLevelComboBox->addItem("5 - Balanced", 5);
     ui->flacCompressionLevelComboBox->addItem("6 - High", 6);
     ui->flacCompressionLevelComboBox->addItem("7 - High", 7);
-    ui->flacCompressionLevelComboBox->addItem("8 - Best (smallest files, slowest)", 8);
+    ui->flacCompressionLevelComboBox->addItem("8 - Default / best compression", 8);
 
     // Build the diskBufferQueueSizeComboBox
     ui->diskBufferQueueSizeComboBox->clear();
@@ -243,28 +301,37 @@ void ConfigurationDialog::loadConfiguration(const Configuration& configuration)
     Configuration::CaptureFormat configFormat = configuration.getCaptureFormat();
     int storedSampleRateKHz = configuration.getSampleRate(); // kHz value
 
-    // Map combined raw formats to base format (sample rate already stored as kHz)
+    // Migrate combined legacy raw formats to native signed 16-bit.  Firmware
+    // 3.1 supports 20 MSPS as its lowest hardware rate.
     if (configFormat == Configuration::CaptureFormat::sixteenBitSigned_Half) {
         ui->captureFormatComboBox->setCurrentIndex(ui->captureFormatComboBox->findData(static_cast<unsigned int>(Configuration::CaptureFormat::sixteenBitSigned)));
         storedSampleRateKHz = 20000;
     } else if (configFormat == Configuration::CaptureFormat::sixteenBitSigned_Quarter) {
         ui->captureFormatComboBox->setCurrentIndex(ui->captureFormatComboBox->findData(static_cast<unsigned int>(Configuration::CaptureFormat::sixteenBitSigned)));
-        storedSampleRateKHz = 10000;
+        storedSampleRateKHz = 20000;
+    } else if (configFormat == Configuration::CaptureFormat::ldfCompressed) {
+        // LDF is represented by the FLAC base format plus its output-extension
+        // selector.  Looking up ldfCompressed in the base-format combo leaves
+        // the combo at -1 and previously broke the remainder of this page.
+        ui->captureFormatComboBox->setCurrentIndex(ui->captureFormatComboBox->findData(static_cast<unsigned int>(Configuration::CaptureFormat::flacDirect)));
     } else {
         ui->captureFormatComboBox->setCurrentIndex(ui->captureFormatComboBox->findData(static_cast<unsigned int>(configFormat)));
     }
 
-    // Force-rebuild the sampleRateComboBox for the current format. If the format
-    // didn't change, setCurrentIndex() above emits no signal, leaving the combo
-    // empty. Calling onCaptureFormatChanged() directly ensures it is always
-    // populated before we try to restore the stored sample rate.
+    // Update FLAC-only control visibility after the base-format migration.
     onCaptureFormatChanged(ui->captureFormatComboBox->currentIndex());
 
     int sampleRateItemIndex = ui->sampleRateComboBox->findData(storedSampleRateKHz);
     if (sampleRateItemIndex < 0) sampleRateItemIndex = 0;  // fallback to first item
     ui->sampleRateComboBox->setCurrentIndex(sampleRateItemIndex);
     ui->flacCompressionLevelComboBox->setCurrentIndex(ui->flacCompressionLevelComboBox->findData(configuration.getFlacCompressionLevel()));
-    ui->flacOutputFormatComboBox->setCurrentIndex(configuration.getFlacOutputFormat());
+    const int flacOutputFormat = (configFormat == Configuration::CaptureFormat::ldfCompressed)
+            ? 1
+            : configuration.getFlacOutputFormat();
+    ui->flacOutputFormatComboBox->setCurrentIndex(
+            ui->flacOutputFormatComboBox->findData(flacOutputFormat));
+    ui->frontEndGainComboBox->setCurrentIndex(
+            ui->frontEndGainComboBox->findData(configuration.getFrontEndGainSwitches()));
 
     // USB
     ui->vendorIdLineEdit->setText(QString::number(configuration.getUsbVid()));
@@ -356,24 +423,15 @@ void ConfigurationDialog::saveConfiguration(Configuration& configuration)
     // Capture
     configuration.setCaptureDirectory(ui->captureDirectoryLineEdit->text());
     
-    // Combine capture format and sample rate into final format
+    // Capture format and hardware sample rate are independent in firmware 3.1.
     Configuration::CaptureFormat baseFormat = static_cast<Configuration::CaptureFormat>(ui->captureFormatComboBox->itemData(ui->captureFormatComboBox->currentIndex()).toInt());
     int sampleRateKHz = ui->sampleRateComboBox->currentData().toInt(); // stored as kHz
-    int flacOutputFormat = ui->flacOutputFormatComboBox->currentIndex();
+    int flacOutputFormat = ui->flacOutputFormatComboBox->currentData().toInt();
 
     Configuration::CaptureFormat finalFormat = baseFormat;
 
-    // For 16-bit raw: encode sample rate into the format enum (backward compat)
-    if (baseFormat == Configuration::CaptureFormat::sixteenBitSigned) {
-        if (sampleRateKHz == 20000) {
-            finalFormat = Configuration::CaptureFormat::sixteenBitSigned_Half;
-        } else if (sampleRateKHz == 10000) {
-            finalFormat = Configuration::CaptureFormat::sixteenBitSigned_Quarter;
-        }
-        // else keep as sixteenBitSigned (40 MSPS full rate)
-    }
     // For FLAC: choose ldfCompressed vs flacDirect based on output format dropdown
-    else if (baseFormat == Configuration::CaptureFormat::flacDirect) {
+    if (baseFormat == Configuration::CaptureFormat::flacDirect) {
         if (flacOutputFormat == 1) {
             finalFormat = Configuration::CaptureFormat::ldfCompressed;
         }
@@ -382,8 +440,9 @@ void ConfigurationDialog::saveConfiguration(Configuration& configuration)
 
     configuration.setCaptureFormat(finalFormat);
     configuration.setFlacCompressionLevel(ui->flacCompressionLevelComboBox->itemData(ui->flacCompressionLevelComboBox->currentIndex()).toInt());
-    configuration.setFlacOutputFormat(ui->flacOutputFormatComboBox->currentIndex());
+    configuration.setFlacOutputFormat(flacOutputFormat);
     configuration.setSampleRate(sampleRateKHz); // store actual kHz
+    configuration.setFrontEndGainSwitches(ui->frontEndGainComboBox->currentData().toInt());
 
     // USB
     configuration.setUsbVid(static_cast<quint16>(ui->vendorIdLineEdit->text().toInt()));
@@ -566,7 +625,7 @@ void ConfigurationDialog::encodeToFlac(const QString& inputFilePath, const QStri
               << "-o" << outputFilePath  // Output file
               << "-";  // Read from stdin
 
-    flacProcess.setProgram("flac");
+    flacProcess.setProgram(flacProgramPath());
     flacProcess.setArguments(arguments);
 
     // Open the input file
@@ -597,13 +656,22 @@ void ConfigurationDialog::encodeToFlac(const QString& inputFilePath, const QStri
     qDebug() << "FLAC encoding completed successfully. Output file:" << outputFilePath;
 }
 
-void ConfigurationDialog::encodeToLdf(const QString& inputFilePath, const QString& outputFilePath, int downsampleFactor)
+bool ConfigurationDialog::encodeToLdf(const QString& inputFilePath, const QString& outputFilePath,
+    int sampleRateKHz, bool testMode, int frontEndGainSwitches, const QString& gatewareVersion)
 {
     QProcess flacProcess;
+    const bool outputExistedBefore = QFileInfo::exists(outputFilePath);
+    const auto removePartialOutput = [&]()
+    {
+        if (!outputExistedBefore && QFileInfo::exists(outputFilePath))
+            QFile::remove(outputFilePath);
+    };
 
-    // Calculate the effective sample rate after downsampling
-    int baseSampleRate = 40000;  // 40 kHz base sample rate
-    int effectiveSampleRate = baseSampleRate / downsampleFactor;
+    // The FPGA has already produced the selected 40/20 MSPS stream. LDF is a
+    // post-capture container conversion only; applying host resampling here would
+    // change the time base a second time.
+    const int effectiveSampleRate = sampleRateKHz == 20000 ? 20000 : 40000;
+    const int hardwareDecimation = effectiveSampleRate == 20000 ? 2 : 1;
 
     // Set up the FLAC encoder command for LDF format (ld-compress compatible)
     // LDF uses FLAC compression with specific settings to match ld-compress output
@@ -613,109 +681,96 @@ void ConfigurationDialog::encodeToLdf(const QString& inputFilePath, const QStrin
               << "--sign=signed"  // Signed input
               << "--channels=1"  // Mono
               << "--bps=16"  // 16 bits per sample
-              << QString("--sample-rate=%1").arg(effectiveSampleRate)  // Correct sample rate for downsampled data
+              << QString("--sample-rate=%1").arg(effectiveSampleRate)
+              << "--force-raw-format"
+              << "--tag=ENCODER=DomesdayDuplicator-2.1"
+              << "--tag=DDD_VERSION=2.1"
+              << QString("--tag=DDD_SAMPLE_RATE_HZ=%1").arg(effectiveSampleRate * 1000)
+              << QString("--tag=DDD_DECIMATION=%1").arg(hardwareDecimation)
+              << QString("--tag=DDD_TEST_MODE=%1").arg(testMode ? "true" : "false")
               << "--exhaustive-model-search"  // Better compression matching ld-compress
               << "--qlp-coeff-precision-search"  // Optimize coefficient precision
-              << "--threads=8"  // Multi-threading support
+              << "-j" << "8"  // FLAC 1.5 multi-threading support
               << "-o" << outputFilePath  // Output file
               << "-";  // Read from stdin
+    const std::string gainDescription = DddFrontEndGain::Description(frontEndGainSwitches);
+    if (!gainDescription.empty())
+        arguments.insert(arguments.size() - 3,
+            QString("--tag=DDD_FRONT_END_GAIN=%1").arg(QString::fromUtf8(gainDescription)));
+    if (!gatewareVersion.isEmpty())
+        arguments.insert(arguments.size() - 3,
+            QString("--tag=DDD_GATEWARE_VERSION=%1").arg(gatewareVersion));
 
-    flacProcess.setProgram("flac");
+    const QString flacProgram = flacProgramPath();
+    flacProcess.setProgram(flacProgram);
     flacProcess.setArguments(arguments);
 
     // Open the input file
     QFile inputFile(inputFilePath);
     if (!inputFile.open(QIODevice::ReadOnly)) {
         qWarning() << "Failed to open input file for LDF encoding:" << inputFilePath;
-        return;
+        return false;
     }
+    inputFile.close();
 
-    qDebug() << "Starting LDF (ld-compress compatible) encoding with" << downsampleFactor << "x downsampling...";
+    // Let QProcess connect the file directly to the child's stdin. QProcess::write()
+    // only confirms that data entered its user-space queue, so streaming a full-side
+    // raw capture through write() can otherwise buffer hundreds of gigabytes in RAM
+    // when level-8 FLAC encoding is slower than sequential disk reads.
+    flacProcess.setStandardInputFile(inputFilePath);
 
-    // Initialize resampler if downsampling is required
-    std::unique_ptr<AudioResampler> resampler;
-    if (downsampleFactor > 1) {
-        resampler = std::make_unique<AudioResampler>();
-        if (!resampler->initialize(baseSampleRate, effectiveSampleRate)) {
-            qWarning() << "Failed to initialize audio resampler";
-            inputFile.close();
-            return;
-        }
-    }
+    qDebug() << "Starting LDF encoding for native" << effectiveSampleRate << "kHz-labelled RF data...";
 
     // Start the FLAC process
     flacProcess.start();
     if (!flacProcess.waitForStarted()) {
         qWarning() << "Failed to start FLAC process for LDF encoding:" << flacProcess.errorString();
-        inputFile.close();
-        return;
+        removePartialOutput();
+        return false;
     }
 
-    // Process the input file data with resampling if needed
-    const qint64 inputBufferSize = 32768;  // Input buffer size (16-bit samples)
-    std::vector<int16_t> inputBuffer(inputBufferSize / 2);  // Buffer for 16-bit samples
-    std::vector<int16_t> outputBuffer;
-    
-    if (resampler) {
-        // Pre-allocate output buffer for resampling
-        int expectedOutputSize = resampler->getExpectedOutputSampleCount(inputBufferSize / 2);
-        outputBuffer.resize(expectedOutputSize + 1024); // Add some extra space for safety
-    }
-
-    while (!inputFile.atEnd()) {
-        QByteArray rawData = inputFile.read(inputBufferSize);
-        if (rawData.isEmpty()) break;
-        
-        // Convert QByteArray to 16-bit signed samples
-        int sampleCount = rawData.size() / 2;
-        memcpy(inputBuffer.data(), rawData.data(), rawData.size());
-        
-        QByteArray outputData;
-        
-        if (resampler) {
-            // Perform resampling
-            int resampledSamples = resampler->resample(inputBuffer.data(), sampleCount, 
-                                                      outputBuffer.data(), outputBuffer.size());
-            if (resampledSamples < 0) {
-                qWarning() << "Resampling failed";
-                break;
-            }
-            
-            // Convert resampled data back to QByteArray
-            outputData = QByteArray((const char*)outputBuffer.data(), resampledSamples * 2);
-        } else {
-            // No resampling needed, use original data
-            outputData = rawData;
-        }
-        
-        // Write to FLAC process
-        qint64 written = flacProcess.write(outputData);
-        if (written != outputData.size()) {
-            qWarning() << "Failed to write complete buffer to FLAC process";
-            break;
-        }
-        
-        // Allow for real-time processing
+    // A full-side level-8 encode can legitimately take longer than five minutes.
+    // Keep the UI responsive and wait for the encoder's real completion instead
+    // of timing out and risking the only raw capture.
+    while (flacProcess.state() != QProcess::NotRunning)
+    {
+        flacProcess.waitForFinished(100);
         QCoreApplication::processEvents();
     }
 
-    inputFile.close();
-    flacProcess.closeWriteChannel();
-
-    // Wait for the process to finish with timeout
-    if (!flacProcess.waitForFinished(300000)) {  // 5 minute timeout
-        qWarning() << "LDF encoding process timed out or failed:" << flacProcess.errorString();
-        flacProcess.kill();
-        return;
-    }
-
-    if (flacProcess.exitCode() != 0) {
+    if (flacProcess.exitStatus() != QProcess::NormalExit || flacProcess.exitCode() != 0) {
         qWarning() << "LDF encoding process failed with exit code:" << flacProcess.exitCode();
         qWarning() << "Standard error:" << flacProcess.readAllStandardError();
-        return;
+        removePartialOutput();
+        return false;
+    }
+
+    // Do not delete the raw source merely because flac created a file. Verify
+    // the complete stream first; partial FLAC files also begin with fLaC.
+    QProcess verifier;
+    verifier.setProgram(flacProgram);
+    verifier.setArguments({"-t", "--silent", outputFilePath});
+    verifier.start();
+    if (!verifier.waitForStarted())
+    {
+        qWarning() << "Failed to start FLAC verification for LDF:" << verifier.errorString();
+        removePartialOutput();
+        return false;
+    }
+    while (verifier.state() != QProcess::NotRunning)
+    {
+        verifier.waitForFinished(100);
+        QCoreApplication::processEvents();
+    }
+    if (verifier.exitStatus() != QProcess::NormalExit || verifier.exitCode() != 0)
+    {
+        qWarning() << "LDF verification failed:" << verifier.readAllStandardError();
+        removePartialOutput();
+        return false;
     }
 
     qDebug() << "LDF encoding completed successfully. Output file:" << outputFilePath;
+    return true;
 }
 
 void ConfigurationDialog::encodeToFlacDirect(const QString& inputFilePath, const QString& outputFilePath, int compressionLevel, int downsampleFactor)
@@ -740,7 +795,7 @@ void ConfigurationDialog::encodeToFlacDirect(const QString& inputFilePath, const
               << "-o" << outputFilePath  // Output file
               << "-";  // Read from stdin
 
-    flacProcess.setProgram("flac");
+    flacProcess.setProgram(flacProgramPath());
     flacProcess.setArguments(arguments);
 
     // Open the input file
@@ -923,40 +978,9 @@ void ConfigurationDialog::onCaptureFormatChanged(int index)
     ui->flacOutputFormatLabel->setVisible(showFlacControls);
     ui->flacOutputFormatComboBox->setVisible(showFlacControls);
 
-    // Show sample rate control for 16-bit formats (both raw and FLAC)
-    bool showSampleRateControls = (selectedFormat == Configuration::CaptureFormat::sixteenBitSigned ||
-                                   selectedFormat == Configuration::CaptureFormat::flacDirect);
-    ui->sampleRateLabel->setVisible(showSampleRateControls);
-    ui->sampleRateComboBox->setVisible(showSampleRateControls);
-
-    if (!showSampleRateControls)
-        return;
-
-    // Rebuild sample rate combo with format-appropriate options (stored as kHz)
-    int prevKHz = ui->sampleRateComboBox->currentData().toInt();
-    ui->sampleRateComboBox->blockSignals(true);
-    ui->sampleRateComboBox->clear();
-
-    if (selectedFormat == Configuration::CaptureFormat::flacDirect) {
-        // FLAC via ffmpeg soxr — any rate works; offer all useful RF digitisation rates
-        ui->sampleRateComboBox->addItem("40 MSPS",                40000);
-        ui->sampleRateComboBox->addItem("28 MSPS",                28000);
-        ui->sampleRateComboBox->addItem("24 MSPS (S-VHS/Video8)", 24000);
-        ui->sampleRateComboBox->addItem("20 MSPS (VHS PAL)",       20000);
-        ui->sampleRateComboBox->addItem("18 MSPS",                18000);
-        ui->sampleRateComboBox->addItem("16 MSPS",                16000);
-        ui->sampleRateComboBox->addItem("10 MSPS",                10000);
-    } else {
-        // Raw 16-bit — software downsampling supports integer fractions only
-        ui->sampleRateComboBox->addItem("40 MSPS (Full Rate)", 40000);
-        ui->sampleRateComboBox->addItem("20 MSPS (1/2 Rate)", 20000);
-        ui->sampleRateComboBox->addItem("10 MSPS (1/4 Rate)", 10000);
-    }
-
-    // Restore previous selection if available, else default to first item
-    int idx = ui->sampleRateComboBox->findData(prevKHz);
-    ui->sampleRateComboBox->setCurrentIndex(idx >= 0 ? idx : 0);
-    ui->sampleRateComboBox->blockSignals(false);
+    // The hardware sample-rate choice applies to every output format.
+    ui->sampleRateLabel->setVisible(true);
+    ui->sampleRateComboBox->setVisible(true);
 }
 
 void ConfigurationDialog::onSampleRateChanged(int index)

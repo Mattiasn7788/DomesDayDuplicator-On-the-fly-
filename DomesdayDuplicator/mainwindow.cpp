@@ -29,6 +29,7 @@
 #include <filesystem>
 #include <system_error>
 #include "ui_mainwindow.h"
+#include "DddFrontEndGain.h"
 #include "UsbDeviceLibUsb.h"
 #ifdef _WIN32
 #include "UsbDeviceWinUsb.h"
@@ -54,6 +55,20 @@
 #include <QApplication>
 #include <QPalette>
 #include <QStyleFactory>
+
+namespace
+{
+QString pathToQString(const std::filesystem::path& path)
+{
+#ifdef _WIN32
+    return QString::fromStdWString(path.wstring());
+#else
+    const std::u8string utf8 = path.u8string();
+    return QString::fromUtf8(reinterpret_cast<const char*>(utf8.data()),
+        static_cast<int>(utf8.size()));
+#endif
+}
+}
 
 MainWindow::MainWindow(const ILogger& log, QWidget* parent) :
     QMainWindow(parent),
@@ -210,6 +225,14 @@ MainWindow::~MainWindow()
     // Ask the threads to stop
     qDebug() << "MainWindow::~MainWindow(): Quit selected; asking threads to stop...";
     if (playerControl->isRunning()) playerControl->stop();
+    if (captureStopThread.joinable())
+    {
+        captureStopThread.join();
+    }
+    if (usbDevice->GetCaptureSessionOpen())
+    {
+        usbDevice->StopCapture();
+    }
     usbDevice.reset();
 
     // Schedule the objects for deletion
@@ -575,10 +598,21 @@ void MainWindow::updateCaptureStatus()
             auto durationFilePath = captureFilePath;
             durationFilePath.replace_filename(newFileName);
 
-            // Rename the output file
-            std::filesystem::rename(captureFilePath, durationFilePath);
-            qDebug() << "MainWindow::StartCapture(): Renamed file to" << durationFilePath;
-            usedCaptureFilePath = durationFilePath;
+            // Capture/encoder failures may leave no output to rename. Keep the original
+            // path as the metadata anchor and report the failure without throwing through
+            // the Qt timer slot.
+            std::error_code renameError;
+            std::filesystem::rename(captureFilePath, durationFilePath, renameError);
+            if (renameError)
+            {
+                qWarning() << "MainWindow::StartCapture(): Could not append duration to output filename:"
+                           << QString::fromStdString(renameError.message());
+            }
+            else
+            {
+                qDebug() << "MainWindow::StartCapture(): Renamed file to" << durationFilePath;
+                usedCaptureFilePath = durationFilePath;
+            }
         }
 
         // Build our json metadata
@@ -672,6 +706,63 @@ void MainWindow::updateCaptureStatus()
         infoFile["captureInfo"]["clippedMinSampleCount"] = usbDevice->GetClippedMinSampleCount();
         infoFile["captureInfo"]["clippedMaxSampleCount"] = usbDevice->GetClippedMaxSampleCount();
         infoFile["captureInfo"]["sequenceMarkersPresent"] = usbDevice->GetTransferHadSequenceNumbers();
+        infoFile["captureInfo"]["sampleRateHz"] = usbDevice->GetCaptureSampleRateInHz();
+        infoFile["captureInfo"]["converterSampleRateHz"] = DddUsbProtocol::ConverterSampleRateInHz;
+        infoFile["captureInfo"]["hardwareDecimationFactor"] = usbDevice->GetHardwareDecimationFactor();
+        infoFile["captureInfo"]["resamplingImplementation"] =
+            (usbDevice->GetHardwareDecimationFactor() == DddUsbProtocol::HalfRateDecimation)
+                ? "fpga-half-band" : "none";
+        infoFile["captureInfo"]["testMode"] = ui->actionTest_mode->isChecked();
+        if (!usbDevice->GetGatewareVersion().empty())
+        {
+            infoFile["captureInfo"]["gatewareVersion"] = usbDevice->GetGatewareVersion();
+        }
+
+        switch (configuration->getCaptureFormat())
+        {
+        case Configuration::CaptureFormat::tenBitPacked:
+            infoFile["captureInfo"]["captureFormat"] = "packed-10-bit";
+            infoFile["captureInfo"]["sampleFormat"] = "unsigned-10-bit-packed";
+            break;
+        case Configuration::CaptureFormat::flacDirect:
+            infoFile["captureInfo"]["captureFormat"] = "native-flac";
+            infoFile["captureInfo"]["sampleFormat"] = "signed-16-bit";
+            infoFile["captureInfo"]["flacBitsPerSample"] = 16;
+            infoFile["captureInfo"]["flacSampleRateLabelHz"] =
+                usbDevice->GetCaptureSampleRateInHz() / 1000;
+            infoFile["captureInfo"]["flacCompressionLevel"] =
+                configuration->getFlacCompressionLevel();
+            break;
+        case Configuration::CaptureFormat::ldfCompressed:
+            infoFile["captureInfo"]["captureFormat"] = "legacy-ldf";
+            infoFile["captureInfo"]["sampleFormat"] = "signed-16-bit";
+            infoFile["captureInfo"]["flacBitsPerSample"] = 16;
+            infoFile["captureInfo"]["flacSampleRateLabelHz"] =
+                usbDevice->GetCaptureSampleRateInHz() / 1000;
+            infoFile["captureInfo"]["flacCompressionLevel"] = 8;
+            infoFile["captureInfo"]["postProcessingStatus"] = "pending";
+            break;
+        case Configuration::CaptureFormat::sixteenBitSigned:
+        case Configuration::CaptureFormat::sixteenBitSigned_Half:
+        case Configuration::CaptureFormat::sixteenBitSigned_Quarter:
+            infoFile["captureInfo"]["captureFormat"] = "raw-signed-16-bit";
+            infoFile["captureInfo"]["sampleFormat"] = "signed-16-bit";
+            break;
+        }
+
+        const uint8_t frontEndGainSwitches = usbDevice->GetCaptureFrontEndGainSwitches();
+        if (frontEndGainSwitches != 0)
+        {
+            const std::string switchPattern =
+                DddFrontEndGain::SwitchPatternString(frontEndGainSwitches);
+            infoFile["captureInfo"]["frontEndGainSwitchPattern"] = switchPattern;
+            infoFile["captureInfo"]["frontEndGain"] =
+                DddFrontEndGain::Description(frontEndGainSwitches);
+            infoFile["captureInfo"]["frontEndGainMultiplier"] =
+                DddFrontEndGain::Gain(frontEndGainSwitches);
+            infoFile["captureInfo"]["frontEndFullScaleMillivoltsPeakToPeak"] =
+                DddFrontEndGain::FullScaleInputMillivoltsPeakToPeak(frontEndGainSwitches);
+        }
 
         // Helper function to turn our sample times into a millisecond count since the start of the capture process,
         // encoded as fixed-length strings with 8 characters. This is enough to keep the indexes in numeric order for
@@ -708,12 +799,107 @@ void MainWindow::updateCaptureStatus()
             infoFile["timeSampledData"]["statusRecord"][sampleTimeString] = entry.playerState;
         }
 
-        // Turn the json structure into a string. We "prettify" this json with an indent to make it easier to visually
-        // inspect.
-        const int jsonIndentLevel = 4;
-        std::string jsonString = infoFile.dump(jsonIndentLevel);
+        // Perform post-capture compression if needed (LDF/FLAC only)
+        // Note: Downsampling formats are now processed in real-time during capture
+        if (configuration->getCaptureFormat() == Configuration::CaptureFormat::ldfCompressed)
+        {
+            // For compressed formats, we need to process the raw 16-bit data
+            // The capture was done to a temporary .s16 file, now we need to process it
+            std::filesystem::path processedFilePath = usedCaptureFilePath;
 
-        // Write the json metadata to our metadata output file
+            // Create temporary raw file path for processing source
+            std::filesystem::path tempRawPath = usedCaptureFilePath;
+            tempRawPath.replace_extension(".s16.tmp");
+            const std::filesystem::path baseTempRawPath = tempRawPath;
+            for (unsigned int suffix = 1; std::filesystem::exists(tempRawPath); ++suffix)
+            {
+                tempRawPath = baseTempRawPath;
+                tempRawPath += "." + std::to_string(suffix);
+            }
+
+            qDebug() << "Post-capture processing: Preparing to process" << pathToQString(usedCaptureFilePath);
+
+            // Rename the captured file to temporary raw format
+            bool rawCaptureMoved = false;
+            try {
+                std::filesystem::rename(usedCaptureFilePath, tempRawPath);
+                rawCaptureMoved = true;
+            } catch (const std::filesystem::filesystem_error& e) {
+                qWarning() << "Failed to rename captured file for processing:" << e.what();
+                infoFile["captureInfo"]["requestedCaptureFormat"] = "legacy-ldf";
+                infoFile["captureInfo"]["captureFormat"] = "raw-signed-16-bit";
+                infoFile["captureInfo"]["postProcessingStatus"] = "not-started";
+                infoFile["captureInfo"]["preservedRawPath"] =
+                    pathToQString(usedCaptureFilePath).toUtf8().toStdString();
+                QMessageBox::warning(this, tr("LDF compression not started"),
+                    tr("The raw signed-16 capture could not be moved to its temporary name. "
+                       "It has been left unchanged at:\n%1")
+                        .arg(pathToQString(usedCaptureFilePath)));
+            }
+
+            if (rawCaptureMoved && std::filesystem::exists(tempRawPath))
+            {
+                bool ldfEncoded = false;
+                // Update GUI to show processing in progress
+                ui->capturePushButton->setText(tr("Processing..."));
+                QCoreApplication::processEvents();
+
+                if (configuration->getCaptureFormat() == Configuration::CaptureFormat::ldfCompressed)
+                {
+                    qDebug() << "Starting LDF compression...";
+                    ldfEncoded = configurationDialog->encodeToLdf(
+                        pathToQString(tempRawPath),
+                        pathToQString(processedFilePath),
+                        static_cast<int>(usbDevice->GetCaptureSampleRateInHz() / 1000),
+                        ui->actionTest_mode->isChecked(),
+                        usbDevice->GetCaptureFrontEndGainSwitches(),
+                        QString::fromStdString(usbDevice->GetGatewareVersion()));
+                    if (!ldfEncoded)
+                    {
+                        infoFile["captureInfo"]["requestedCaptureFormat"] = "legacy-ldf";
+                        infoFile["captureInfo"]["captureFormat"] = "raw-signed-16-bit";
+                        infoFile["captureInfo"]["postProcessingStatus"] = "failed";
+                        infoFile["captureInfo"]["preservedRawPath"] =
+                            pathToQString(tempRawPath).toUtf8().toStdString();
+                        QMessageBox::warning(this, tr("LDF compression failed"),
+                            tr("The compressed file could not be completed or verified. "
+                               "The original signed-16 capture has been preserved at:\n%1")
+                                .arg(pathToQString(tempRawPath)));
+                    }
+                }
+
+                // Remove the temporary raw file after successful processing
+                if (ldfEncoded && std::filesystem::exists(processedFilePath))
+                {
+                    infoFile["captureInfo"]["postProcessingStatus"] = "success";
+                    std::error_code finalSizeError;
+                    const uintmax_t finalSize =
+                        std::filesystem::file_size(processedFilePath, finalSizeError);
+                    if (!finalSizeError)
+                    {
+                        infoFile["captureInfo"]["fileSizeWrittenInBytes"] = finalSize;
+                    }
+                    try {
+                        std::filesystem::remove(tempRawPath);
+                        qDebug() << "Successfully processed and removed temporary file";
+                    } catch (const std::filesystem::filesystem_error& e) {
+                        qWarning() << "Failed to remove temporary file after processing:" << e.what();
+                    }
+                }
+                else
+                {
+                    // Keep the raw file under its truthful .s16.tmp name. Never
+                    // replace it with a partial .ldf or delete it on encoder failure.
+                    qWarning() << "LDF processing failed; preserving raw capture at"
+                               << pathToQString(tempRawPath);
+                }
+            }
+        }
+
+        // Write metadata only after optional LDF processing so file size, output
+        // format, and any preserved raw path describe the artifact that actually exists.
+        const int jsonIndentLevel = 4;
+        const std::string jsonString = infoFile.dump(jsonIndentLevel);
         std::filesystem::path metadataFilePath = usedCaptureFilePath;
         metadataFilePath.replace_extension(".json");
         std::ofstream metadataFile;
@@ -727,73 +913,6 @@ void MainWindow::updateCaptureStatus()
             metadataFile.write(jsonString.data(), jsonString.size());
         }
         metadataFile.close();
-
-        // Perform post-capture compression if needed (LDF/FLAC only)
-        // Note: Downsampling formats are now processed in real-time during capture
-        if (configuration->getCaptureFormat() == Configuration::CaptureFormat::ldfCompressed)
-        {
-            // For compressed formats, we need to process the raw 16-bit data
-            // The capture was done to a temporary .s16 file, now we need to process it
-            std::filesystem::path processedFilePath = usedCaptureFilePath;
-            
-            // Create temporary raw file path for processing source
-            std::filesystem::path tempRawPath = usedCaptureFilePath;
-            tempRawPath.replace_extension(".s16.tmp");
-            
-            qDebug() << "Post-capture processing: Preparing to process" << QString::fromStdString(usedCaptureFilePath.string());
-            
-            // Rename the captured file to temporary raw format
-            try {
-                std::filesystem::rename(usedCaptureFilePath, tempRawPath);
-            } catch (const std::filesystem::filesystem_error& e) {
-                qWarning() << "Failed to rename captured file for processing:" << e.what();
-                // Continue without processing
-            }
-            
-            if (std::filesystem::exists(tempRawPath))
-            {
-                // Update GUI to show processing in progress
-                ui->capturePushButton->setText(tr("Processing..."));
-                QCoreApplication::processEvents();
-                
-                if (configuration->getCaptureFormat() == Configuration::CaptureFormat::ldfCompressed)
-                {
-                    qDebug() << "Starting LDF compression...";
-                    configurationDialog->encodeToLdf(QString::fromStdString(tempRawPath.string()),
-                                                   QString::fromStdString(processedFilePath.string()),
-                                                   1);  // No downsampling, factor = 1
-                }
-                else if (configuration->getCaptureFormat() == Configuration::CaptureFormat::flacDirect)
-                {
-                    qDebug() << "Starting direct FLAC compression...";
-                    configurationDialog->encodeToFlacDirect(QString::fromStdString(tempRawPath.string()),
-                                                           QString::fromStdString(processedFilePath.string()),
-                                                           configuration->getFlacCompressionLevel(),
-                                                           1);  // No downsampling, factor = 1
-                }
-                
-                // Remove the temporary raw file after successful processing
-                if (std::filesystem::exists(processedFilePath))
-                {
-                    try {
-                        std::filesystem::remove(tempRawPath);
-                        qDebug() << "Successfully processed and removed temporary file";
-                    } catch (const std::filesystem::filesystem_error& e) {
-                        qWarning() << "Failed to remove temporary file after processing:" << e.what();
-                    }
-                }
-                else
-                {
-                    // Processing failed, restore the original file
-                    qWarning() << "Processing failed, restoring original file";
-                    try {
-                        std::filesystem::rename(tempRawPath, usedCaptureFilePath);
-                    } catch (const std::filesystem::filesystem_error& e) {
-                        qWarning() << "Failed to restore original file after processing failure:" << e.what();
-                    }
-                }
-            }
-        }
 
         // Update the gui state now that capturing is complete
         if (ui->actionTest_mode->isChecked())
@@ -1064,7 +1183,7 @@ void MainWindow::updateStorageInformation()
     storageInfo->refresh();
     if (storageInfo->isValid()) {
         // Calculate the space required per second based on the selected sample format
-        size_t samplesPerSecond = 40 * 1000 * 1000;
+        const size_t samplesPerSecond = static_cast<size_t>(configuration->getSampleRate()) * 1000;
         size_t bytesPerSecond = 0;
         switch (configuration->getCaptureFormat())
         {
@@ -1073,33 +1192,30 @@ void MainWindow::updateStorageInformation()
             bytesPerSecond = samplesPerSecond * 2;
             break;
         case Configuration::CaptureFormat::sixteenBitSigned_Half:
-            // 2 bytes per sample, but at half the sample rate (20 MSPS)
-            bytesPerSecond = (samplesPerSecond / 2) * 2;
-            break;
         case Configuration::CaptureFormat::sixteenBitSigned_Quarter:
-            // 2 bytes per sample, but at quarter the sample rate (10 MSPS)
-            bytesPerSecond = (samplesPerSecond / 4) * 2;
+            // Legacy settings are migrated to the selected FPGA output rate.
+            bytesPerSecond = samplesPerSecond * 2;
             break;
         case Configuration::CaptureFormat::tenBitPacked:
             // 5 bytes every 4 samples
             bytesPerSecond = (samplesPerSecond / 4) * 5;
             break;
         case Configuration::CaptureFormat::ldfCompressed:
-            // FLAC compression typically achieves 40-60% compression on RF data
-            // Estimate ~50% of 16-bit size for storage calculation
-            // Note: For now, FLAC formats capture at full rate and apply downsampling in software
-            bytesPerSecond = (samplesPerSecond * 2) / 2;
+            // LDF first records a native signed-16 temporary file, then creates
+            // the compressed output alongside it. Budget raw (2 B/sample) plus
+            // the official conservative FLAC estimate (1 B/sample).
+            bytesPerSecond = samplesPerSecond * 3;
             break;
         case Configuration::CaptureFormat::flacDirect:
-            // On-the-fly FLAC at the chosen sample rate, 8-bit.
-            // RF data typically achieves ~5% of uncompressed size with FLAC.
-            bytesPerSecond = static_cast<size_t>(configuration->getSampleRate()) * 1000 / 20;
+            // Conservative native signed-16 FLAC estimate: about half the raw size.
+            // This matches the firmware 3.1 GUI's 40/20 MB/s planning figures.
+            bytesPerSecond = samplesPerSecond;
             break;
         }
 
         // Calculate the amount of time we can record based on the available space
         size_t bytesAvailable = (size_t)storageInfo->bytesAvailable();
-        size_t availableSeconds = bytesAvailable / bytesPerSecond;
+        size_t availableSeconds = bytesPerSecond > 0 ? bytesAvailable / bytesPerSecond : 0;
 
         // Print the time available
         if (availableSeconds > (60 * 60 * 96))
@@ -1158,15 +1274,26 @@ void MainWindow::on_actionExit_triggered()
 // Menu option: Edit->Test mode
 void MainWindow::on_actionTest_mode_toggled(bool arg1)
 {
-    if (arg1) {
-        // Turn test-mode on
-        usbDevice->SendConfigurationCommand(configuration->getUsbPreferredDevice().toStdString(), true);
-        ui->capturePushButton->setText("Test data capture");
-    } else {
-        // Turn test-mode off
-        usbDevice->SendConfigurationCommand(configuration->getUsbPreferredDevice().toStdString(), false);
-        ui->capturePushButton->setText("Capture");
+    const uint8_t decimationFactor = (configuration->getSampleRate() == 20000)
+        ? DddUsbProtocol::HalfRateDecimation
+        : DddUsbProtocol::FullRateDecimation;
+    const bool configured = usbDevice->SendConfigurationCommand(
+        configuration->getUsbPreferredDevice().toStdString(), arg1, decimationFactor);
+    if (!configured)
+    {
+        // Keep the menu and capture button truthful if the firmware rejected the
+        // requested test/rate combination (for example 20 MSPS on legacy firmware).
+        ui->actionTest_mode->blockSignals(true);
+        ui->actionTest_mode->setChecked(!arg1);
+        ui->actionTest_mode->blockSignals(false);
+        ui->capturePushButton->setText(arg1 ? "Capture" : "Test data capture");
+        QMessageBox::warning(this, tr("Device configuration failed"),
+            tr("The connected DDD did not accept the selected test mode and sample rate. "
+               "20 MSPS requires firmware 3.1 or later."));
+        return;
     }
+
+    ui->capturePushButton->setText(arg1 ? "Test data capture" : "Capture");
 }
 
 // Menu option->Advanced naming
@@ -1217,12 +1344,15 @@ void MainWindow::StopCapture()
     playerControl->stopAutomaticCapture(); // Stop auto-capture if in progress
     StopAudioCapture();
     StopSdrCapture();
-    std::thread stopThread([&]()
+    if (captureStopThread.joinable())
+    {
+        captureStopThread.join();
+    }
+    captureStopThread = std::thread([this]()
         {
             usbDevice->StopCapture();
             isCaptureRunning = false;
         });
-    stopThread.detach();
 }
 
 void MainWindow::StartCapture()
@@ -1235,8 +1365,6 @@ void MainWindow::StartCapture()
 
     // Ensure that the test mode option matches the device configuration
     bool isTestMode = ui->actionTest_mode->isChecked();
-    qDebug() << "MainWindow::StartCapture(): Setting device's test mode flag to" << isTestMode;
-    usbDevice->SendConfigurationCommand(configuration->getUsbPreferredDevice().toStdString(), isTestMode);
 
     // Use the advanced naming dialogue to generate the capture file name
     captureFilePath = std::filesystem::path((char8_t const*)configuration->getCaptureDirectory().toUtf8().data());
@@ -1340,9 +1468,9 @@ void MainWindow::StartCapture()
     // Reset the capture statistics
     ui->numberOfTransfersLabel->setText(tr("0"));
 
-    // Determine the capture format
-    // For compressed formats (LDF/FLAC), we capture as 16-bit and compress post-capture
-    // For downsampling formats, we use real-time downsampling during capture
+    // Determine the file format. The 20/40 MSPS choice is independent: firmware 3.1
+    // performs the 2:1 half-band decimation before USB, so none of these paths should
+    // downsample the same stream a second time.
     UsbDeviceBase::CaptureFormat captureFormat = UsbDeviceBase::CaptureFormat::Signed16Bit;
     if (configuration->getCaptureFormat() == Configuration::CaptureFormat::tenBitPacked)
     {
@@ -1351,18 +1479,18 @@ void MainWindow::StartCapture()
     }
     else if (configuration->getCaptureFormat() == Configuration::CaptureFormat::sixteenBitSigned)
     {
-        qDebug() << "MainWindow::StartCapture(): Starting transfer - 16-bit (40 MSPS)";
+        qDebug() << "MainWindow::StartCapture(): Starting transfer - native signed 16-bit";
         captureFormat = UsbDeviceBase::CaptureFormat::Signed16Bit;
     }
     else if (configuration->getCaptureFormat() == Configuration::CaptureFormat::sixteenBitSigned_Half)
     {
-        qDebug() << "MainWindow::StartCapture(): Starting transfer - 16-bit 1/2 rate (20 MSPS) with real-time downsampling";
-        captureFormat = UsbDeviceBase::CaptureFormat::Signed16BitHalf;
+        qDebug() << "MainWindow::StartCapture(): Migrating legacy half-rate setting to FPGA-selected signed 16-bit";
+        captureFormat = UsbDeviceBase::CaptureFormat::Signed16Bit;
     }
     else if (configuration->getCaptureFormat() == Configuration::CaptureFormat::sixteenBitSigned_Quarter)
     {
-        qDebug() << "MainWindow::StartCapture(): Starting transfer - 16-bit 1/4 rate (10 MSPS) with real-time downsampling";
-        captureFormat = UsbDeviceBase::CaptureFormat::Signed16BitQuarter;
+        qDebug() << "MainWindow::StartCapture(): Migrating legacy quarter-rate setting to FPGA-selected signed 16-bit";
+        captureFormat = UsbDeviceBase::CaptureFormat::Signed16Bit;
     }
     else if (configuration->getCaptureFormat() == Configuration::CaptureFormat::ldfCompressed)
     {
@@ -1371,10 +1499,8 @@ void MainWindow::StartCapture()
     }
     else if (configuration->getCaptureFormat() == Configuration::CaptureFormat::flacDirect)
     {
-        // For FLAC Direct, pipe raw s16le through ffmpeg+flac on-the-fly (no temp file)
-        // getSampleRate() returns the target output rate in kHz (e.g. 20000 = 20 MSPS)
         captureFormat = UsbDeviceBase::CaptureFormat::Signed16BitFlacOnTheFly;
-        qDebug() << "MainWindow::StartCapture(): Starting transfer - FLAC Direct on-the-fly"
+        qDebug() << "MainWindow::StartCapture(): Starting transfer - native signed-16 FLAC on-the-fly at"
                  << configuration->getSampleRate() / 1000 << "MSPS";
     }
     else
@@ -1400,9 +1526,14 @@ void MainWindow::StartCapture()
     qDebug() << "MainWindow::StartCapture(): Starting capture to file:" << captureFilePath;
     int flacLevel = (captureFormat == UsbDeviceBase::CaptureFormat::Signed16BitFlacOnTheFly)
                     ? configuration->getFlacCompressionLevel() : 8;
-    int flacOutputSampleRateInHz = (captureFormat == UsbDeviceBase::CaptureFormat::Signed16BitFlacOnTheFly)
-                    ? configuration->getSampleRate() * 1000 : 20000000;
-    if (!usbDevice->StartCapture(captureFilePath, captureFormat, configuration->getUsbPreferredDevice().toStdString(), isTestMode, useSmallUsbTransfers, useAsyncFileIo, maxUsbTransferQueueSizeInBytes, maxDiskBufferQueueSizeInBytes, flacLevel, flacOutputSampleRateInHz))
+    const uint8_t decimationFactor = (configuration->getSampleRate() == 20000)
+        ? DddUsbProtocol::HalfRateDecimation
+        : DddUsbProtocol::FullRateDecimation;
+    if (!usbDevice->StartCapture(captureFilePath, captureFormat,
+        configuration->getUsbPreferredDevice().toStdString(), isTestMode,
+        useSmallUsbTransfers, useAsyncFileIo, maxUsbTransferQueueSizeInBytes,
+        maxDiskBufferQueueSizeInBytes, flacLevel, decimationFactor,
+        static_cast<uint8_t>(configuration->getFrontEndGainSwitches())))
     {
         // Show an error based on the transfer result
         qDebug() << "MainWindow::StartCapture(): Failed to begin the capture process";
@@ -1419,6 +1550,9 @@ void MainWindow::StartCapture()
                 break;
             case UsbDeviceBase::TransferResult::ConnectionFailure:
                 errorMessage = "Failed to start capture. A connection could not be established to the USB capture device.";
+                break;
+            case UsbDeviceBase::TransferResult::DeviceConfigurationError:
+                errorMessage = "Failed to configure the capture device. 20 MSPS requires firmware 3.1 or later, and the requested setting must read back correctly.";
                 break;
         }
         messageBox.critical(this, "Error", errorMessage.c_str());
@@ -1914,7 +2048,20 @@ void MainWindow::updateAmplitudeLabel()
     {
         amplitudeRecord.push_back({ std::chrono::steady_clock::now(), amplitude });
     }
-    ui->meanAmplitudeLabel->setText(QString::number(amplitude, 'f', 3));
+    const int frontEndGainSwitches = configuration->getFrontEndGainSwitches();
+    if (DddFrontEndGain::IsDeclared(frontEndGainSwitches))
+    {
+        const double millivoltsPeakToPeak = amplitude *
+            DddFrontEndGain::FullScaleInputMillivoltsPeakToPeak(frontEndGainSwitches);
+        ui->meanAmplitudeLabel->setText(
+            QString("%1 FS / %2 mV p-p")
+                .arg(amplitude, 0, 'f', 3)
+                .arg(millivoltsPeakToPeak, 0, 'f', 0));
+    }
+    else
+    {
+        ui->meanAmplitudeLabel->setText(QString("%1 FS").arg(amplitude, 0, 'f', 3));
+    }
 }
 
 // Update amplitude UI elements

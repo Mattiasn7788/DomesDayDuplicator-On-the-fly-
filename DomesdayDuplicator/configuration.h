@@ -75,6 +75,8 @@ public:
     int getFlacOutputFormat() const;
     void setSampleRate(int sampleRate);
     int getSampleRate() const;
+    void setFrontEndGainSwitches(int switchPattern);
+    int getFrontEndGainSwitches() const;
     void setUsbVid(quint16 vid);
     quint16 getUsbVid() const;
     void setUsbPid(quint16 pid);
@@ -151,7 +153,8 @@ private:
         CaptureFormat captureFormat;
         int flacCompressionLevel;
         int flacOutputFormat;  // 0 = .flac, 1 = .ldf
-        int sampleRate;  // Output sample rate in kHz (e.g. 20000 = 20 MSPS). Default 20000.
+        int sampleRate;  // Hardware sample rate in kHz: 40000 or 20000. Default 40000.
+        int frontEndGainSwitches; // Declared SW401 pattern, 1..15; 0 = undeclared.
     };
 
     struct Usb {
